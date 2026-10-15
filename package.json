@@ -1,0 +1,12 @@
+{
+  "name": "testplugins",
+  "version": "1.0.0",
+  "description": "SkyStream plugins repository",
+  "private": true,
+  "scripts": {
+    "deploy": "skystream deploy -u https://raw.githubusercontent.com/USER_NAME/testplugins/main/"
+  },
+  "devDependencies": {
+    "skystream-extractors": "latest"
+  }
+}

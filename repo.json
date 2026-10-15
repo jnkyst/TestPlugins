@@ -1,0 +1,9 @@
+{
+  "name": "TestPlugins",
+  "packageName": "com.jnkyst.repo",
+  "description": "SkyStream plugins repository",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/plugins.json"
+  ]
+}
