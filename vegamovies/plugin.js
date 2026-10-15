@@ -1,8 +1,8 @@
 (function () {
   "use strict";
   const MIRRORS = "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json";
-  const CINEMETA = 'https://api.themoviedb.org';
-  const defaults = { vegamovies: "https://vegamovies.m", rogmovies: "https://rogmovies.vi" };
+  const CINEMETA = "https://v3-cinemeta.strem.io/meta";
+  const defaults = { vegamovies: "https://vegamovies.mq", rogmovies: "https://rogmovies.vip" };
   const abs = (u, b) => { try { return new URL(u, b).href; } catch (_) { return u || ""; } };
   const root = u => { try { return new URL(u).origin; } catch (_) { return u; } };
   const clean = s => String(s || "")

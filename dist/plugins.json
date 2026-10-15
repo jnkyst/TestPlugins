@@ -29,24 +29,24 @@
       "Series"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.movies4u.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.movies4u.sky"
   },
   {
     "packageName": "com.jnkyst.repo.vegamovies",
     "name": "vegamovies",
     "version": 1,
-    "baseUrl": "https://vegamovies.galler/",
+    "baseUrl": "https://vegamovies.mq",
     "description": "VegaMovies and RogMovies providers",
     "providers": [
       {
         "id": "vegamovies",
         "name": "VegaMovies",
-        "baseUrl": "https://vegamovies.galle/"
+        "baseUrl": "https://vegamovies.mq"
       },
       {
         "id": "rogmovies",
         "name": "RogMovies",
-        "baseUrl": "https://rogmovies.one/"
+        "baseUrl": "https://rogmovies.vip"
       }
     ],
     "authors": [
@@ -63,6 +63,6 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.vegamovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.vegamovies.sky"
   }
 ]
