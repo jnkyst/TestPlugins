@@ -1,15 +1,47 @@
 [
   {
+    "packageName": "com.jnkyst.repo.movies4u",
+    "name": "Movies4u",
+    "version": 1,
+    "baseUrl": "https://new2.movies4u.garden",
+    "domains": [
+      {
+        "name": "new1.movies4u.garden (primary)",
+        "url": "https://new2.movies4u.garden"
+      }
+    ],
+    "description": "Bollywood, Hollywood, Hindi dubbed & South movies, web series, TV shows and K-dramas from Movies4u — multi-audio player plus HubCloud/GDFlix files",
+    "authors": [
+      "Jnkyst"
+    ],
+    "languages": [
+      "hi",
+      "en",
+      "ta",
+      "te",
+      "ml",
+      "kn",
+      "pa",
+      "ko"
+    ],
+    "categories": [
+      "Movies",
+      "Series"
+    ],
+    "isAdult": false,
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.movies4u.sky"
+  },
+  {
     "packageName": "com.jnkyst.repo.vegamovies",
     "name": "vegamovies",
     "version": 1,
-    "baseUrl": "https://vegamovies.gallery/",
+    "baseUrl": "https://vegamovies.galler/",
     "description": "VegaMovies and RogMovies providers",
     "providers": [
       {
         "id": "vegamovies",
         "name": "VegaMovies",
-        "baseUrl": "https://vegamovies.gallery/"
+        "baseUrl": "https://vegamovies.galle/"
       },
       {
         "id": "rogmovies",
@@ -31,6 +63,6 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.vegamovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.vegamovies.sky"
   }
 ]
