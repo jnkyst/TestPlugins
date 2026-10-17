@@ -9,12 +9,8 @@
       "id": "vegamovies",
       "name": "VegaMovies",
       "baseUrl": "https://vegamovies.mq"
-    },
-    {
-      "id": "rogmovies",
-      "name": "RogMovies",
-      "baseUrl": "https://rogmovies.vip"
     }
+    
   ],
   "authors": [
     "Jnkyst"
