@@ -1,8 +1,8 @@
 {
   "packageName": "com.jnkyst.repo.vegamovies",
-  "name": "vegamovies",
+  "name": "Vegamovies",
   "version": 1,
-  "baseUrl": "https://vegamovies.mq",
+  "baseUrl": "https://new1.vegamovies.lease/",
   "description": "VegaMovies and RogMovies providers",
   "providers": [
     {
