@@ -1,5 +1,35 @@
 [
   {
+    "packageName": "com.jnkyst.repo.cinefreak",
+    "name": "CineFreak",
+    "version": 1,
+    "baseUrl": "https://cinefreak.ch",
+    "description": "CineFreak — Hindi, English, dual-audio movies, web series & K-Drama. Catalog and search come from the site's own search index (works where the site domain is blocked), live domain auto-detected, direct 480p/720p/1080p files.",
+    "authors": [
+      "Jnkyst"
+    ],
+    "languages": [
+      "hi",
+      "en",
+      "mal"
+    ],
+    "categories": [
+      "Movie",
+      "TvSeries"
+    ],
+    "domains": [
+      {
+        "name": "cinefreak.ch (current)",
+        "url": "https://cinefreak.ch"
+      },
+      {
+        "name": "cinefreak.net",
+        "url": "https://cinefreak.net"
+      }
+    ],
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.cinefreak.sky"
+  },
+  {
     "packageName": "com.jnkyst.repo.movies4u",
     "name": "Movies4u",
     "version": 1,
@@ -29,7 +59,7 @@
       "Series"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.movies4u.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.movies4u.sky"
   },
   {
     "packageName": "com.jnkyst.repo.rogmovies",
@@ -58,7 +88,7 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.rogmovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.rogmovies.sky"
   },
   {
     "packageName": "com.jnkyst.repo.vegamovies",
@@ -87,6 +117,6 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.vegamovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.vegamovies.sky"
   }
 ]
