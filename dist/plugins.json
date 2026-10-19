@@ -4,28 +4,21 @@
     "name": "CineFreak",
     "version": 1,
     "baseUrl": "https://cinefreak.ch",
-    "description": "CineFreak — Hindi, English, dual-audio movies, web series & K-Drama. Catalog and search come from the site's own search index (works where the site domain is blocked), live domain auto-detected, direct 480p/720p/1080p files.",
+    "description": "Cinefreak plugin for Jnkyst",
     "authors": [
-      "Jnkyst"
+      "Igris"
     ],
     "languages": [
-      "hi",
       "en",
-      "mal"
+      "hi",
+      "ta",
+      "te",
+      "ml",
+      "kn",
+      "bn"
     ],
     "categories": [
-      "Movie",
-      "TvSeries"
-    ],
-    "domains": [
-      {
-        "name": "cinefreak.ch (current)",
-        "url": "https://cinefreak.ch"
-      },
-      {
-        "name": "cinefreak.net",
-        "url": "https://cinefreak.net"
-      }
+      "Others"
     ],
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.cinefreak.sky"
   },
