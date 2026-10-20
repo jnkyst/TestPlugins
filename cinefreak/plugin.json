@@ -4,7 +4,7 @@
   "version": 1,
   "baseUrl": "https://cinefreak.ch",
   "description": "Cinefreak plugin for Jnkyst",
-  "authors": ["Igris"],
+  "authors": ["Jnkyst"],
   "languages": ["en", "hi", "ta", "te", "ml", "kn", "bn"],
   "categories": ["Others"]
 }

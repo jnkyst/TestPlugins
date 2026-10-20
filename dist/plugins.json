@@ -6,7 +6,7 @@
     "baseUrl": "https://cinefreak.ch",
     "description": "Cinefreak plugin for Jnkyst",
     "authors": [
-      "Igris"
+      "Jnkyst"
     ],
     "languages": [
       "en",
@@ -20,7 +20,7 @@
     "categories": [
       "Others"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.cinefreak.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.cinefreak.sky"
   },
   {
     "packageName": "com.jnkyst.repo.movies4u",
@@ -52,7 +52,36 @@
       "Series"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.movies4u.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.movies4u.sky"
+  },
+  {
+    "packageName": "com.jnkyst.repo.moviesdrive",
+    "name": "MoviesDrive",
+    "version": 1,
+    "baseUrl": "https://new2.moviesdrives.my",
+    "domains": [
+      {
+        "name": "new2.moviesdrives.my",
+        "url": "https://new2.moviesdrives.my"
+      },
+      {
+        "name": "moviesdrive.forum",
+        "url": "https://moviesdrive.forum"
+      }
+    ],
+    "description": "Premium VOD Scraper with metadata sync",
+    "authors": [
+      "Jnkyst"
+    ],
+    "languages": [
+      "en",
+      "hi"
+    ],
+    "categories": [
+      "Movie",
+      "TvSeries"
+    ],
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.moviesdrive.sky"
   },
   {
     "packageName": "com.jnkyst.repo.rogmovies",
@@ -81,7 +110,7 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.rogmovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.rogmovies.sky"
   },
   {
     "packageName": "com.jnkyst.repo.vegamovies",
@@ -110,6 +139,6 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.vegamovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.vegamovies.sky"
   }
 ]

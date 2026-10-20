@@ -1,0 +1,28 @@
+{
+  "packageName": "com.jnkyst.repo.moviesdrive",
+  "name": "MoviesDrive",
+  "version": 1,
+   "baseUrl": "https://new2.moviesdrives.my",
+  "domains": [
+    {
+      "name": "new2.moviesdrives.my",
+      "url": "https://new2.moviesdrives.my"
+    },
+    {
+      "name": "moviesdrive.forum",
+      "url": "https://moviesdrive.forum"
+    }
+  ],
+  "description": "Premium VOD Scraper with metadata sync",
+  "authors": [
+    "Jnkyst"
+  ],
+  "languages": [
+    "en",
+    "hi"
+  ],
+  "categories": [
+    "Movie",
+    "TvSeries"
+  ]
+}
