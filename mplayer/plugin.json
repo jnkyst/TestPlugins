@@ -1,0 +1,10 @@
+{
+  "packageName": "com.jnkyst.repo.mplayer",
+  "name": "MPlayer",
+  "version": 1,
+  "baseUrl": "https://www.mxplayer.in",
+  "description": "Watch movies and series from M Player",
+  "authors": ["IGRIS"],
+  "languages": ["hi", "en", "te"],
+  "categories": ["Movies", "Series"]
+}
