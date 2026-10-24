@@ -87,7 +87,7 @@
       "Movies"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katdrama.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katdrama.sky"
   },
   {
     "packageName": "com.jnkyst.repo.katmoviehd",
@@ -114,7 +114,7 @@
       "Anime"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katmoviehd.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katmoviehd.sky"
   },
   {
     "packageName": "com.jnkyst.repo.movies4u",
