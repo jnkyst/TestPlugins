@@ -23,6 +23,61 @@
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.cinefreak.sky"
   },
   {
+    "packageName": "com.jnkyst.repo.katdrama",
+    "name": "KatDrama",
+    "version": 1,
+    "baseUrl": "https://new.katdrama.my",
+    "domains": [
+      {
+        "name": "new.katdrama.my (primary)",
+        "url": "https://new.katdrama.my"
+      }
+    ],
+    "description": "Korean & Chinese dramas in Hindi, dual audio & English dubbed from KatDrama — per-episode packs, working GDFlix instant links",
+    "authors": [
+      "Jnkyst"
+    ],
+    "languages": [
+      "hi",
+      "en",
+      "ko",
+      "zh"
+    ],
+    "categories": [
+      "Series",
+      "Movies"
+    ],
+    "isAdult": false,
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katdrama.sky"
+  },
+  {
+    "packageName": "com.jnkyst.repo.katmoviehd",
+    "name": "KatMovieHD",
+    "version": 1,
+    "baseUrl": "https://new2.katmoviehd.top/",
+    "domains": [
+      {
+        "name": "new.katmoviehd.top (primary)",
+        "url": "https://new2.katmoviehd.top"
+      }
+    ],
+    "description": "KatMovieHD — Hollywood & web series in Hindi dubbed / dual audio. Movies in every posted quality (StreamTape, HubCloud, GDFlix Instant / Drive), series with full episode lists and other seasons merged in. Links are checked before they are shown.",
+    "authors": [
+      "Jnkyst"
+    ],
+    "languages": [
+      "hi",
+      "en"
+    ],
+    "categories": [
+      "Movies",
+      "Series",
+      "Anime"
+    ],
+    "isAdult": false,
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katmoviehd.sky"
+  },
+  {
     "packageName": "com.jnkyst.repo.movies4u",
     "name": "Movies4u",
     "version": 1,

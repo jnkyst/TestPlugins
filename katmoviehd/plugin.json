@@ -1,0 +1,26 @@
+{
+  "packageName": "com.jnkyst.repo.katmoviehd",
+  "name": "KatMovieHD",
+  "version": 1,
+   "baseUrl": "https://new2.katmoviehd.top/",
+  "domains": [
+    {
+      "name": "new.katmoviehd.top (primary)",
+      "url": "https://new2.katmoviehd.top"
+    }
+  ],
+  "description": "KatMovieHD — Hollywood & web series in Hindi dubbed / dual audio. Movies in every posted quality (StreamTape, HubCloud, GDFlix Instant / Drive), series with full episode lists and other seasons merged in. Links are checked before they are shown.",
+  "authors": [
+    "Jnkyst"
+  ],
+  "languages": [
+    "hi",
+    "en"
+  ],
+  "categories": [
+    "Movies",
+    "Series",
+    "Anime"
+  ],
+  "isAdult": false
+}
