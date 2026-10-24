@@ -1,0 +1,18 @@
+{
+  "packageName": "com.jnkyst.repo.hdhub4u",
+  "name": "Hdhub4u",
+  "version": 1,
+  "baseUrl": "https://new2.hdhub4u.li",
+  "description": "Bollywood, Hollywood and Hindi Dubbed Movies & Web Series",
+  "authors": [
+    "phisher",
+    "Akash",
+    "Jnkyst"
+  ],
+  "languages": [
+    "hi"
+  ],
+  "categories": [
+    "Movie",  "TvSeries"
+  ]
+}

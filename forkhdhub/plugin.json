@@ -1,0 +1,10 @@
+{
+  "packageName": "com.jnkyst.repo.forkhdhub",
+  "name": "Forkhdhub",
+  "version": 1,
+   "baseUrl": "https://4khdhub.one",
+  "description": "4K Movies and TV Shows (VOD)",
+  "authors": ["phisher", "jnkyst"],
+  "languages": ["en"],
+  "categories": ["Movie", "TvSeries"]
+}
