@@ -4,6 +4,6 @@
   "description": "SkyStream plugins repository",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/plugins.json"
+    "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/plugins.json"
   ]
 }

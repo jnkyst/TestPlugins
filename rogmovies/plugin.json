@@ -2,13 +2,13 @@
   "packageName": "com.jnkyst.repo.rogmovies",
   "name": "RogMovies",
   "version": 1,
-  "baseUrl": "https://rogmovies.one/",
+  "baseUrl": "https://rogmovies.im/",
   "description": "VegaMovies and RogMovies providers",
   "providers": [
     {
       "id": "rogmovies",
       "name": "RogMovies",
-      "baseUrl": "https://rogmovies.one/"
+      "baseUrl": "https://rogmovies.im/"
     }
   ],
   "authors": [
