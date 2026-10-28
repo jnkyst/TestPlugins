@@ -2,11 +2,11 @@
   "packageName": "com.jnkyst.repo.movies4u",
   "name": "Movies4u",
   "version": 1,
-  "baseUrl": "https://new2.movies4u.garden",
+  "baseUrl": "https://new3.movies4u.garden",
   "domains": [
     {
       "name": "new1.movies4u.garden (primary)",
-      "url": "https://new2.movies4u.garden"
+      "url": "https://new3.movies4u.garden"
     }
   ],
   "description": "Bollywood, Hollywood, Hindi dubbed & South movies, web series, TV shows and K-dramas from Movies4u — multi-audio player plus HubCloud/GDFlix files",

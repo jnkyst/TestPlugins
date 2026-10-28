@@ -87,7 +87,7 @@
       "Movies"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katdrama.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katdrama.sky"
   },
   {
     "packageName": "com.jnkyst.repo.katmoviehd",
@@ -114,17 +114,17 @@
       "Anime"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katmoviehd.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katmoviehd.sky"
   },
   {
     "packageName": "com.jnkyst.repo.movies4u",
     "name": "Movies4u",
     "version": 1,
-    "baseUrl": "https://new2.movies4u.garden",
+    "baseUrl": "https://new3.movies4u.garden",
     "domains": [
       {
         "name": "new1.movies4u.garden (primary)",
-        "url": "https://new2.movies4u.garden"
+        "url": "https://new3.movies4u.garden"
       }
     ],
     "description": "Bollywood, Hollywood, Hindi dubbed & South movies, web series, TV shows and K-dramas from Movies4u — multi-audio player plus HubCloud/GDFlix files",
