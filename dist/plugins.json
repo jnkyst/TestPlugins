@@ -87,7 +87,7 @@
       "Movies"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katdrama.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katdrama.sky"
   },
   {
     "packageName": "com.jnkyst.repo.katmoviehd",
@@ -114,7 +114,7 @@
       "Anime"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katmoviehd.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.katmoviehd.sky"
   },
   {
     "packageName": "com.jnkyst.repo.movies4u",
@@ -198,35 +198,6 @@
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.mplayer.sky"
   },
   {
-    "packageName": "com.jnkyst.repo.rogmovies",
-    "name": "RogMovies",
-    "version": 1,
-    "baseUrl": "https://rogmovies.im/",
-    "description": "VegaMovies and RogMovies providers",
-    "providers": [
-      {
-        "id": "rogmovies",
-        "name": "RogMovies",
-        "baseUrl": "https://rogmovies.im/"
-      }
-    ],
-    "authors": [
-      "Jnkyst"
-    ],
-    "languages": [
-      "hi",
-      "en",
-      "te",
-      "ta",
-      "ma"
-    ],
-    "categories": [
-      "Movies",
-      "series"
-    ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.rogmovies.sky"
-  },
-  {
     "packageName": "com.jnkyst.repo.vegamovies",
     "name": "Vegamovies",
     "version": 1,
@@ -237,6 +208,11 @@
         "id": "vegamovies",
         "name": "VegaMovies",
         "baseUrl": "https://new1.vegamovies.lease/"
+      },
+      {
+        "id": "rogmovies",
+        "name": "RogMovies",
+        "baseUrl": "https://rogmovies.im/"
       }
     ],
     "authors": [

@@ -9,8 +9,12 @@
       "id": "vegamovies",
       "name": "VegaMovies",
       "baseUrl": "https://new1.vegamovies.lease/"
+    },
+    {
+      "id": "rogmovies",
+      "name": "RogMovies",
+      "baseUrl": "https://rogmovies.im/"
     }
-    
   ],
   "authors": [
     "Jnkyst"
