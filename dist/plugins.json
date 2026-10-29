@@ -20,7 +20,7 @@
     "categories": [
       "Others"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.cinefreak.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.cinefreak.sky"
   },
   {
     "packageName": "com.jnkyst.repo.forkhdhub",
@@ -39,7 +39,7 @@
       "Movie",
       "TvSeries"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.forkhdhub.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.forkhdhub.sky"
   },
   {
     "packageName": "com.jnkyst.repo.hdhub4u",
@@ -59,7 +59,7 @@
       "Movie",
       "TvSeries"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.hdhub4u.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.hdhub4u.sky"
   },
   {
     "packageName": "com.jnkyst.repo.katdrama",
@@ -146,7 +146,7 @@
       "Series"
     ],
     "isAdult": false,
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.movies4u.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.movies4u.sky"
   },
   {
     "packageName": "com.jnkyst.repo.moviesdrive",
@@ -175,7 +175,7 @@
       "Movie",
       "TvSeries"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.moviesdrive.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.moviesdrive.sky"
   },
   {
     "packageName": "com.jnkyst.repo.mplayer",
@@ -195,7 +195,7 @@
       "Movies",
       "Series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.mplayer.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.mplayer.sky"
   },
   {
     "packageName": "com.jnkyst.repo.rogmovies",
@@ -224,7 +224,7 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.rogmovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.rogmovies.sky"
   },
   {
     "packageName": "com.jnkyst.repo.vegamovies",
@@ -253,6 +253,6 @@
       "Movies",
       "series"
     ],
-    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/refs/heads/main/dist/com.jnkyst.repo.vegamovies.sky"
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.vegamovies.sky"
   }
 ]
