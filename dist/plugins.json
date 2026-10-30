@@ -198,6 +198,23 @@
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.mplayer.sky"
   },
   {
+    "packageName": "com.jnkyst.repo.rogmovies",
+    "name": "Rogmovies",
+    "version": 1,
+    "baseUrl": "https://rogmovies.im/",
+    "description": "Rogmovies plugin for TestPlugins",
+    "authors": [
+      "Jnkyst"
+    ],
+    "languages": [
+      "en"
+    ],
+    "categories": [
+      "Others"
+    ],
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.rogmovies.sky"
+  },
+  {
     "packageName": "com.jnkyst.repo.vegamovies",
     "name": "Vegamovies",
     "version": 1,

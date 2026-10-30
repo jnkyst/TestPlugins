@@ -1,0 +1,16 @@
+{
+  "packageName": "com.jnkyst.repo.rogmovies",
+  "name": "Rogmovies",
+  "version": 1,
+  "baseUrl": "https://rogmovies.im/",
+  "description": "Rogmovies plugin for TestPlugins",
+  "authors": [
+    "Jnkyst"
+  ],
+  "languages": [
+    "en"
+  ],
+  "categories": [
+    "Others"
+  ]
+}

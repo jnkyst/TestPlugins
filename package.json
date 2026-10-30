@@ -7,6 +7,9 @@
     "deploy": "skystream deploy -u https://raw.githubusercontent.com/USER_NAME/testplugins/main/"
   },
   "devDependencies": {
-    "skystream-extractors": "latest"
+    "skystream-extractors": "^1.3.8"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0"
   }
 }

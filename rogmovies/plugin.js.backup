@@ -1,0 +1,445 @@
+
+/*
+ * RogMovies — SkyStream Gen 2 plugin
+ * WordPress REST API source: https://rogmovies.im
+ *
+ * Implements: getHome, search, load, loadStreams
+ */
+
+(function () {
+  "use strict";
+
+  const API_FIELDS =
+  "id,date,link,title,excerpt,content,meta,categories,class_list,fifu_image_url,_embedded";
+  const DEFAULT_POSTER = "https://rogmovies.im/wp-content/uploads/placeholder.jpg";
+
+  function baseUrl() {
+    const configured =
+      (typeof manifest !== "undefined" && manifest && manifest.baseUrl)
+        ? manifest.baseUrl
+        : "https://rogmovies.im";
+    return String(configured).replace(/\/+$/, "");
+  }
+
+  function cleanText(value) {
+    return String(value || "")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;|&#160;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0*39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&#(\d+);/g, function (_, n) {
+        return String.fromCharCode(Number(n));
+      })
+      .replace(/&#x([0-9a-f]+);/gi, function (_, n) {
+        return String.fromCharCode(parseInt(n, 16));
+      })
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getTitle(post) {
+    return cleanText(post && post.title && post.title.rendered) || "Untitled";
+  }
+
+  function getDescription(post) {
+    return cleanText(
+      (post && post.excerpt && post.excerpt.rendered) ||
+      (post && post.content && post.content.rendered) ||
+      ""
+    );
+  }
+
+  function getPoster(post) {
+    const embedded =
+      post && post._embedded && post._embedded["wp:featuredmedia"] &&
+      post._embedded["wp:featuredmedia"][0] &&
+      post._embedded["wp:featuredmedia"][0].source_url;
+
+    return (
+      (post && post.fifu_image_url) ||
+      (post && post.meta && post.meta.fifu_image_url) ||
+      embedded ||
+      DEFAULT_POSTER
+    );
+  }
+
+  function getYear(post) {
+    const titleYear = getTitle(post).match(/\b(19|20)\d{2}\b/);
+    const dateYear = String(post && post.date || "").match(/^\d{4}/);
+    return titleYear ? Number(titleYear[0]) : (dateYear ? Number(dateYear[0]) : undefined);
+  }
+
+  function isSeries(post) {
+    const title = getTitle(post);
+    const classes = Array.isArray(post && post.class_list) ? post.class_list.join(" ") : "";
+
+    return (
+      /\b(web[\s-]?series|series|season|s\d{1,2}\s*e\d{1,2}|complete\s+series)\b/i.test(title) ||
+      /category-(web-series|tv-series|series)\b/i.test(classes)
+    );
+  }
+
+  function toItem(post) {
+    return {
+      title: getTitle(post),
+      url: "rogmovies:post:" + String(post.id),
+      posterUrl: getPoster(post),
+      type: isSeries(post) ? "series" : "movie",
+      year: getYear(post),
+      description: getDescription(post)
+    };
+  }
+
+  // Use SkyStream's native HTTP helper. Browser fetch() is unavailable.
+  async function requestText(url, accept) {
+    if (typeof http_get !== "function") {
+      throw new Error("SkyStream HTTP helper http_get() is unavailable.");
+    }
+
+    const response = await http_get(url, {
+      Accept: accept || "*/*",
+      "Cache-Control": "no-cache",
+      "User-Agent": "Mozilla/5.0"
+    });
+
+    if (!response || response.status < 200 || response.status >= 300) {
+      const status = response ? response.status : "no response";
+      throw new Error("HTTP request failed (" + status + "): " + url);
+    }
+
+    return String(response.body || "");
+  }
+
+  async function requestJson(url) {
+    const body = await requestText(url, "application/json");
+
+    try {
+      return JSON.parse(body);
+    } catch (error) {
+      throw new Error("WordPress API returned invalid JSON: " + url);
+    }
+  }
+
+ 
+async function getPosts(params) {
+  const url =
+    baseUrl() +
+    "/wp-json/wp/v2/posts/?" +
+    params +
+    "&_embed=1&_fields=" +
+    encodeURIComponent(API_FIELDS);
+
+  // First retrieve the list of post IDs.
+  const summaries = await requestJson(url);
+
+  if (!Array.isArray(summaries)) {
+    throw new Error("WordPress posts API did not return a list.");
+  }
+
+  // Then retrieve complete details for each post.
+  const posts = [];
+
+  for (let i = 0; i < summaries.length; i += 5) {
+    const batch = summaries.slice(i, i + 5);
+
+    const details = await Promise.all(
+      batch.map(async function (post) {
+        if (!post || !post.id) return null;
+
+        const detailUrl =
+          baseUrl() +
+          "/wp-json/wp/v2/posts/" +
+          post.id +
+          "?_embed=1";
+
+        return await requestJson(detailUrl);
+      })
+    );
+
+    for (const post of details) {
+      if (post) posts.push(post);
+    }
+  }
+
+  return posts;
+}
+
+
+  function sendError(cb, error, code) {
+    cb({
+      success: false,
+      errorCode: code || "NETWORK_ERROR",
+      message: String(error && error.message ? error.message : error)
+    });
+  }
+
+  async function getHome(cb) {
+    try {
+      const posts = await getPosts("per_page=30&page=1&orderby=date&order=desc");
+      const items = Array.isArray(posts) ? posts.map(toItem) : [];
+      const series = items.filter(function (item) { return item.type === "series"; });
+      const movies = items.filter(function (item) { return item.type === "movie"; });
+
+      const data = {};
+      if (items.length) data["Trending"] = items.slice(0, 10);
+      if (movies.length) data["Latest Movies"] = movies.slice(0, 20);
+      if (series.length) data["Latest Series"] = series.slice(0, 20);
+
+      cb({ success: true, data: data });
+    } catch (error) {
+      sendError(cb, error);
+    }
+  }
+
+  async function search(query, pageOrCb, maybeCb) {
+    const page = typeof pageOrCb === "number" ? pageOrCb : 1;
+    const cb = typeof pageOrCb === "function" ? pageOrCb : maybeCb;
+    if (typeof cb !== "function") return;
+
+    try {
+      const q = encodeURIComponent(String(query || "").trim());
+      if (!q) return cb({ success: true, data: [] });
+
+      const posts = await getPosts(
+        "search=" + q + "&per_page=20&page=" + Math.max(1, page)
+      );
+
+      const items = Array.isArray(posts) ? posts.map(toItem) : [];
+      cb({ success: true, data: items });
+    } catch (error) {
+      sendError(cb, error);
+    }
+  }
+
+  async function findPost(itemUrl) {
+    const value = String(itemUrl || "");
+    const idMatch = value.match(/(?:rogmovies:post:|\/)(\d+)$/);
+
+    if (idMatch && value.indexOf("rogmovies:post:") === 0) {
+      return await requestJson(
+        baseUrl() + "/wp-json/wp/v2/posts/" + idMatch[1] +
+        "?_embed=1&_fields=" + encodeURIComponent(API_FIELDS)
+      );
+    }
+
+    if (/^\d+$/.test(value)) {
+      return await requestJson(
+        baseUrl() + "/wp-json/wp/v2/posts/" + value +
+        "?_fields=" + encodeURIComponent(API_FIELDS)
+      );
+    }
+
+    let slug = value;
+
+    try {
+      const parsed = new URL(value);
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      slug = parts.length ? parts[parts.length - 1] : "";
+
+      const queryId = parsed.searchParams.get("p");
+      if (queryId && /^\d+$/.test(queryId)) {
+        return await requestJson(
+          baseUrl() + "/wp-json/wp/v2/posts/" + queryId +
+          "?_fields=" + encodeURIComponent(API_FIELDS)
+        );
+      }
+    } catch (_) {
+      // Treat the supplied value as a slug below.
+    }
+
+    slug = String(slug).replace(/\/+$/, "");
+    if (!slug) throw new Error("Could not identify the RogMovies post.");
+
+    const posts = await getPosts("slug=" + encodeURIComponent(slug) + "&per_page=1");
+
+    if (!Array.isArray(posts) || !posts.length) {
+      throw new Error("Post not found in the RogMovies WordPress API: " + slug);
+    }
+
+    return posts[0];
+  }
+
+  function extractDownloadLinks(html) {
+    const source = String(html || "");
+    const anchorPattern = /<a\b([^>]*?)href\s*=\s*["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+    const results = [];
+    let match;
+
+    while ((match = anchorPattern.exec(source)) !== null) {
+      let href = String(match[2] || "").replace(/&amp;/g, "&").trim();
+      const label = cleanText(match[4]);
+
+      if (!/^https?:\/\//i.test(href)) continue;
+
+      const before = source.slice(Math.max(0, match.index - 260), match.index);
+      const context = cleanText(before.slice(-220) + " " + label);
+      const combined = (context + " " + href).toLowerCase();
+
+      const looksLikeDownload =
+        /\b(download|g-direct|v-cloud|watch|play|480p|720p|1080p|2160p|4k|web-dl|episode|season)\b/i.test(combined) ||
+        /nexdrive|drive\.google|gofile|pixeldrain|mixdrop|streamtape|filemoon|voe\./i.test(href);
+
+      if (!looksLikeDownload) continue;
+      if (/youtube\.com|youtu\.be|imdb\.com|rogmovies\.im\/category\//i.test(href)) continue;
+
+      if (!results.some(function (entry) { return entry.url === href; })) {
+        results.push({
+          url: href,
+          label: label || context || "Open source " + (results.length + 1),
+          context: context
+        });
+      }
+    }
+
+    return results;
+  }
+
+  function parseSeasonEpisode(text, fallbackIndex) {
+    const seasonMatch = String(text || "").match(/\bS(?:eason\s*)?0*(\d{1,2})\b/i);
+    const episodeMatch = String(text || "").match(/\bE(?:pisode\s*)?0*(\d{1,3})\b/i);
+
+    return {
+      season: seasonMatch ? Number(seasonMatch[1]) : 1,
+      episode: episodeMatch ? Number(episodeMatch[1]) : fallbackIndex
+    };
+  }
+
+  async function load(url, cb) {
+    try {
+      const post = await findPost(url);
+      const item = toItem(post);
+      const html = post && post.content && post.content.rendered || "";
+      const links = extractDownloadLinks(html);
+
+      const episodes = links.map(function (link, index) {
+        const se = parseSeasonEpisode(link.context + " " + link.label, index + 1);
+
+        return {
+          name: link.context || link.label || ("Source " + (index + 1)),
+          url: link.url,
+          season: se.season,
+          episode: se.episode
+        };
+      });
+
+      const detail = Object.assign({}, item, {
+        url: String(post.link || item.url),
+        description: getDescription(post),
+        episodes: episodes
+      });
+
+      cb({ success: true, data: detail });
+    } catch (error) {
+      sendError(cb, error, "LOAD_FAILED");
+    }
+  }
+
+  function isDirectMedia(url) {
+    return /\.(m3u8|mp4|m4v|webm|mpd)(?:$|[?#])/i.test(String(url || ""));
+  }
+
+  function qualityFromUrl(url) {
+    const match = String(url || "").match(/\b(2160|1440|1080|720|480)p?\b/i);
+    return match ? match[1] + "p" : "Auto";
+  }
+
+  function extractEmbedUrls(html, pageUrl) {
+    const source = String(html || "");
+    const found = [];
+    const patterns = [
+      /<iframe\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi,
+      /<video\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi,
+      /<source\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
+    ];
+
+    patterns.forEach(function (pattern) {
+      let match;
+
+      while ((match = pattern.exec(source)) !== null) {
+        let candidate = String(match[1] || "").replace(/&amp;/g, "&");
+
+        if (candidate.startsWith("//")) candidate = "https:" + candidate;
+
+        if (candidate.startsWith("/")) {
+          try {
+            candidate = new URL(candidate, pageUrl).toString();
+          } catch (_) {}
+        }
+
+        if (/^https?:\/\//i.test(candidate) && found.indexOf(candidate) < 0) {
+          found.push(candidate);
+        }
+      }
+    });
+
+    return found;
+  }
+
+  async function loadStreams(url, cb) {
+    try {
+      const target = String(url || "").trim();
+      if (!target) return cb({ success: true, data: [] });
+
+      if (isDirectMedia(target)) {
+        return cb({
+          success: true,
+          data: [{
+            url: target,
+            source: "RogMovies",
+            quality: qualityFromUrl(target)
+          }]
+        });
+      }
+
+      const html = await requestText(
+        target,
+        "text/html,application/json;q=0.9,*/*;q=0.8"
+      );
+
+      const finalUrl = target;
+      const embeds = extractEmbedUrls(html, finalUrl);
+      const streams = [];
+
+      for (let i = 0; i < embeds.length; i++) {
+        const embedUrl = embeds[i];
+
+        if (isDirectMedia(embedUrl)) {
+          streams.push({
+            url: embedUrl,
+            source: "RogMovies Embed " + (i + 1),
+            quality: qualityFromUrl(embedUrl)
+          });
+          continue;
+        }
+
+        if (typeof globalThis.loadExtractor === "function") {
+          try {
+            const extracted = await globalThis.loadExtractor(embedUrl);
+
+            if (Array.isArray(extracted)) {
+              extracted.forEach(function (stream) { streams.push(stream); });
+            } else if (extracted && extracted.url) {
+              streams.push(extracted);
+            }
+          } catch (extractorError) {
+            // Continue checking other embeds.
+          }
+        }
+      }
+
+      cb({ success: true, data: streams });
+    } catch (error) {
+      sendError(cb, error, "STREAMS_FAILED");
+    }
+  }
+
+  globalThis.getHome = getHome;
+  globalThis.search = search;
+  globalThis.load = load;
+  globalThis.loadStreams = loadStreams;
+})();
