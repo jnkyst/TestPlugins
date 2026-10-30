@@ -310,43 +310,55 @@ async function getPosts(params) {
   }
 
   async function load(url, cb) {
-    try {
-      const post = await findPost(url);
-      const item = toItem(post);
-      const html = post && post.content && post.content.rendered || "";
-      const links = extractDownloadLinks(html);
+  try {
+    const post = await findPost(url);
+    const item = toItem(post);
+    const html = post && post.content && post.content.rendered || "";
+    const links = extractDownloadLinks(html);
 
-      const episodes = links.map(function (link, index) {
-        const se = parseSeasonEpisode(link.context + " " + link.label, index + 1);
+    const episodes = links.map(function (link, index) {
+      const label = (link.context || "") + " " + (link.label || "");
+      const se = parseSeasonEpisode(label, index + 1);
 
-        return {
-          name: link.context || link.label || ("Source " + (index + 1)),
-          url: link.url,
-          season: se.season,
-          episode: se.episode
-        };
-      });
+const quality = qualityFromUrl(
+  (link.context || "") + " " + (link.label || "")
+);      return {
+        name: "Watch " + quality,
+        url: link.url + "?skystream_quality=" + encodeURIComponent(quality),
+        quality: quality,
+        season: se.season,
+        episode: se.episode
+      };
+    });
 
-      const detail = Object.assign({}, item, {
-        url: String(post.link || item.url),
-        description: getDescription(post),
-        episodes: episodes
-      });
+    const detail = Object.assign({}, item, {
+      url: String(post.link || item.url),
+      description: getDescription(post),
+      episodes: episodes
+    });
 
-      cb({ success: true, data: detail });
-    } catch (error) {
-      sendError(cb, error, "LOAD_FAILED");
-    }
+    cb({ success: true, data: detail });
+
+  } catch (error) {
+    sendError(cb, error, "LOAD_FAILED");
   }
+}
 
   function isDirectMedia(url) {
     return /\.(m3u8|mp4|m4v|webm|mpd)(?:$|[?#])/i.test(String(url || ""));
   }
 
-  function qualityFromUrl(url) {
-    const match = String(url || "").match(/\b(2160|1440|1080|720|480)p?\b/i);
-    return match ? match[1] + "p" : "Auto";
-  }
+ function qualityFromUrl(value) {
+  const text = String(value || "").toLowerCase();
+
+  if (/\b2160p?\b|\b4k\b/.test(text)) return "2160p";
+  if (/\b1080p?\b/.test(text)) return "1080p";
+  if (/\b720p?\b/.test(text)) return "720p";
+  if (/\b480p?\b/.test(text)) return "480p";
+  if (/\b1440p?\b/.test(text)) return "1440p";
+
+  return "Auto";
+}
 
   function extractEmbedUrls(html, pageUrl) {
   const source = String(html || "");
@@ -453,24 +465,34 @@ function extractGoogleVideoUrl(html) {
     return "";
   }
 }
-
-
-  async function loadStreams(url, cb) {
+async function loadStreams(url, cb) {
   try {
-    const target = String(url || "").trim();
+const originalTarget = String(url || "").trim();
 
+const qualityMatch = originalTarget.match(
+  /[?&]skystream_quality=(2160p|1440p|1080p|720p|480p)/i
+);
+
+const detectedQuality = qualityMatch
+  ? qualityMatch[1].toLowerCase()
+  : "Auto";
+
+const target = originalTarget
+  .replace(/[?&]skystream_quality=(2160p|1440p|1080p|720p|480p)/i, "")
+  .replace(/[?&]$/, "");
     if (!target) {
       return cb({ success: true, data: [] });
     }
 
-    // Already a direct video file.
+   
+
     if (isDirectMedia(target)) {
       return cb({
         success: true,
         data: [{
           url: target,
           source: "RogMovies",
-          quality: qualityFromUrl(target)
+          quality: detectedQuality
         }]
       });
     }
@@ -487,7 +509,6 @@ function extractGoogleVideoUrl(html) {
       const embedUrl = embeds[i];
 
       try {
-        // Handle FastDL links.
         if (new URL(embedUrl).hostname === "fastdl.beer") {
           const fastDlHtml = await requestText(
             embedUrl,
@@ -495,7 +516,6 @@ function extractGoogleVideoUrl(html) {
           );
 
           const downloadPage = extractFastDlVideoUrl(fastDlHtml);
-
           if (!downloadPage) continue;
 
           const downloadHtml = await requestText(
@@ -509,45 +529,24 @@ function extractGoogleVideoUrl(html) {
             streams.push({
               url: videoUrl,
               source: "RogMovies FastDL",
-              quality: qualityFromUrl(videoUrl)
+              quality: detectedQuality
             });
           }
 
           continue;
         }
 
-        // Other direct media links.
         if (isDirectMedia(embedUrl)) {
           streams.push({
             url: embedUrl,
             source: "RogMovies Embed " + (i + 1),
-            quality: qualityFromUrl(embedUrl)
+            quality: detectedQuality
           });
-
-          continue;
         }
-
-        // Try an installed compatible extractor.
-        if (typeof globalThis.loadExtractor === "function") {
-          const extracted = await globalThis.loadExtractor(embedUrl);
-
-          if (Array.isArray(extracted)) {
-            extracted.forEach(function (stream) {
-              streams.push(stream);
-            });
-          } else if (extracted && extracted.url) {
-            streams.push(extracted);
-          }
-        }
-      } catch (embedError) {
-        // Continue checking other links.
-      }
+      } catch (_) {}
     }
 
-    cb({
-      success: true,
-      data: streams
-    });
+    cb({ success: true, data: streams });
 
   } catch (error) {
     sendError(cb, error, "STREAMS_FAILED");
