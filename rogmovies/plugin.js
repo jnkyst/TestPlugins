@@ -196,25 +196,175 @@ async function getPosts(params) {
     }
   }
 
+  
   async function search(query, pageOrCb, maybeCb) {
     const page = typeof pageOrCb === "number" ? pageOrCb : 1;
     const cb = typeof pageOrCb === "function" ? pageOrCb : maybeCb;
     if (typeof cb !== "function") return;
 
     try {
-      const q = encodeURIComponent(String(query || "").trim());
-      if (!q) return cb({ success: true, data: [] });
+      const terms = String(query || "")
+        .toLowerCase()
+        .trim()
+        .split(/\s+/)
+        .filter(function (word) {
+          return word.length > 1 &&
+            !["the", "a", "an", "and", "or", "in", "on", "of", "to"].includes(word);
+        });
 
-      const posts = await getPosts(
-        "search=" + q + "&per_page=20&page=" + Math.max(1, page)
+      if (!terms.length) {
+        return cb({ success: true, data: [] });
+      }
+
+      // Read the sitemap index.
+      const indexXml = await requestText(
+        baseUrl() + "/sitemap.xml",
+        "application/xml,text/xml,*/*"
       );
 
-      const items = Array.isArray(posts) ? posts.map(toItem) : [];
-      cb({ success: true, data: items });
+      // Find all post sitemap URLs.
+      const sitemapUrls = [];
+      const sitemapPattern = /<loc>\s*([^<]+)\s*<\/loc>/gi;
+      let sitemapMatch;
+
+      while ((sitemapMatch = sitemapPattern.exec(indexXml)) !== null) {
+        const sitemapUrl = cleanText(sitemapMatch[1]);
+
+        if (/\/post-sitemap\d*\.xml(?:\?|$)/i.test(sitemapUrl)) {
+          sitemapUrls.push(sitemapUrl);
+        }
+      }
+
+      if (!sitemapUrls.length) {
+        throw new Error("No post sitemaps were found.");
+      }
+
+      // Download all post sitemaps.
+      const sitemapResults = await Promise.all(
+        sitemapUrls.map(async function (url) {
+          try {
+            return await requestText(url, "application/xml,text/xml,*/*");
+          } catch (_) {
+            return "";
+          }
+        })
+      );
+
+      // Collect post URLs whose slugs contain every search term.
+      const candidates = [];
+      const seen = {};
+
+      for (const xml of sitemapResults) {
+        const locPattern = /<loc>\s*([^<]+)\s*<\/loc>/gi;
+        let match;
+
+        while ((match = locPattern.exec(xml)) !== null) {
+          const postUrl = cleanText(match[1]);
+
+          if (!/^https:\/\/rogmovies\.im\//i.test(postUrl)) continue;
+
+          let slug = "";
+          try {
+            const parsed = new URL(postUrl);
+            const parts = parsed.pathname.split("/").filter(Boolean);
+            slug = decodeURIComponent(parts[parts.length - 1] || "")
+              .toLowerCase();
+          } catch (_) {
+            continue;
+          }
+
+          if (!slug || seen[postUrl]) continue;
+
+          const matches = terms.every(function (term) {
+            return slug.indexOf(term) !== -1;
+          });
+
+          if (matches) {
+            seen[postUrl] = true;
+            candidates.push(postUrl);
+          }
+        }
+      }
+
+      // Apply pagination.
+      const pageSize = 20;
+      const start = (Math.max(1, page) - 1) * pageSize;
+      const selected = candidates.slice(start, start + pageSize);
+
+      // Read metadata from each matching movie page.
+      const items = await Promise.all(
+        selected.map(async function (postUrl) {
+          try {
+            const html = await requestText(
+              postUrl,
+              "text/html,application/xhtml+xml,*/*"
+            );
+
+            function getMeta(name) {
+              const tags = html.match(/<meta\b[^>]*>/gi) || [];
+
+              for (const tag of tags) {
+                const keyMatch = tag.match(
+                  /\b(?:property|name)\s*=\s*["']([^"']+)["']/i
+                );
+
+                if (!keyMatch ||
+                    keyMatch[1].toLowerCase() !== name.toLowerCase()) {
+                  continue;
+                }
+
+                const contentMatch = tag.match(
+                  /\bcontent\s*=\s*["']([^"']*)["']/i
+                );
+
+                if (contentMatch) return cleanText(contentMatch[1]);
+              }
+
+              return "";
+            }
+
+            const title = getMeta("og:title") ||
+              getMeta("twitter:title");
+
+            const description = getMeta("og:description") ||
+              getMeta("description");
+
+            const poster = getMeta("og:image") ||
+              getMeta("twitter:image");
+
+            // The RogMovies poster URL contains the WordPress post ID.
+            const idMatch = poster.match(/[?&]p=(\d+)/i);
+
+            if (!title || !idMatch) return null;
+
+            const yearMatch = title.match(/\b(19|20)\d{2}\b/);
+            const series = /\b(web[\s-]?series|series|season|S\d{1,2}\s*E\d{1,2})\b/i
+              .test(title);
+
+            return {
+              title: title,
+              url: "rogmovies:post:" + idMatch[1],
+              posterUrl: poster || DEFAULT_POSTER,
+              type: series ? "series" : "movie",
+              year: yearMatch ? Number(yearMatch[0]) : undefined,
+              description: description
+            };
+          } catch (_) {
+            return null;
+          }
+        })
+      );
+
+      cb({
+        success: true,
+        data: items.filter(Boolean)
+      });
+
     } catch (error) {
-      sendError(cb, error);
+      sendError(cb, error, "SEARCH_FAILED");
     }
   }
+
 
   async function findPost(itemUrl) {
   const value = String(itemUrl || "").trim();
