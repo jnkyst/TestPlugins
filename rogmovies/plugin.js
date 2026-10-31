@@ -217,52 +217,83 @@ async function getPosts(params) {
   }
 
   async function findPost(itemUrl) {
-    const value = String(itemUrl || "");
-    const idMatch = value.match(/(?:rogmovies:post:|\/)(\d+)$/);
+  const value = String(itemUrl || "").trim();
 
-    if (idMatch && value.indexOf("rogmovies:post:") === 0) {
-      return await requestJson(
-        baseUrl() + "/wp-json/wp/v2/posts/" + idMatch[1] +
-        "?_embed=1&_fields=" + encodeURIComponent(API_FIELDS)
-      );
-    }
+  // Handle SkyStream internal post IDs.
+  const internalMatch = value.match(/^rogmovies:post:(\d+)$/);
 
-    if (/^\d+$/.test(value)) {
-      return await requestJson(
-        baseUrl() + "/wp-json/wp/v2/posts/" + value +
-        "?_fields=" + encodeURIComponent(API_FIELDS)
-      );
-    }
-
-    let slug = value;
-
-    try {
-      const parsed = new URL(value);
-      const parts = parsed.pathname.split("/").filter(Boolean);
-      slug = parts.length ? parts[parts.length - 1] : "";
-
-      const queryId = parsed.searchParams.get("p");
-      if (queryId && /^\d+$/.test(queryId)) {
-        return await requestJson(
-          baseUrl() + "/wp-json/wp/v2/posts/" + queryId +
-          "?_fields=" + encodeURIComponent(API_FIELDS)
-        );
-      }
-    } catch (_) {
-      // Treat the supplied value as a slug below.
-    }
-
-    slug = String(slug).replace(/\/+$/, "");
-    if (!slug) throw new Error("Could not identify the RogMovies post.");
-
-    const posts = await getPosts("slug=" + encodeURIComponent(slug) + "&per_page=1");
-
-    if (!Array.isArray(posts) || !posts.length) {
-      throw new Error("Post not found in the RogMovies WordPress API: " + slug);
-    }
-
-    return posts[0];
+  if (internalMatch) {
+    return await requestJson(
+      baseUrl() +
+      "/wp-json/wp/v2/posts/" +
+      internalMatch[1] +
+      "?_embed=1"
+    );
   }
+
+  // Handle numeric WordPress post IDs.
+  if (/^\d+$/.test(value)) {
+    return await requestJson(
+      baseUrl() +
+      "/wp-json/wp/v2/posts/" +
+      value +
+      "?_embed=1"
+    );
+  }
+
+  let slug = value;
+
+  // Extract the slug from a permalink.
+  try {
+    const parsed = new URL(value);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    slug = parts.length ? parts[parts.length - 1] : "";
+
+    const queryId = parsed.searchParams.get("p");
+
+    if (queryId && /^\d+$/.test(queryId)) {
+      return await requestJson(
+        baseUrl() +
+        "/wp-json/wp/v2/posts/" +
+        queryId +
+        "?_embed=1"
+      );
+    }
+  } catch (_) {
+    // Treat the supplied value as a slug.
+  }
+
+  slug = String(slug).replace(/\/+$/, "");
+
+  if (!slug) {
+    throw new Error("Could not identify the RogMovies post.");
+  }
+
+  // First request: resolve the exact slug to a post ID.
+  const summaries = await requestJson(
+    baseUrl() +
+    "/wp-json/wp/v2/posts/?slug=" +
+    encodeURIComponent(slug) +
+    "&per_page=1&_fields=id,slug,link,title"
+  );
+
+  if (
+    !Array.isArray(summaries) ||
+    !summaries.length ||
+    !summaries[0].id
+  ) {
+    throw new Error("Post not found in RogMovies API: " + slug);
+  }
+
+  // Second request: fetch the full post using its verified ID.
+  return await requestJson(
+    baseUrl() +
+    "/wp-json/wp/v2/posts/" +
+    summaries[0].id +
+    "?_embed=1"
+  );
+}
+  
 
   function extractDownloadLinks(html) {
     const source = String(html || "");
