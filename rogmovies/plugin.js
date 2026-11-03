@@ -126,6 +126,63 @@
   }
 
  
+
+async function getArchivePosts(path, limit, categoryId) {
+  const archiveUrl = baseUrl() + path;
+  const html = await requestText(
+    archiveUrl,
+    "text/html,*/*"
+  );
+
+  const postIds = [];
+  const pattern =
+    /<article\b[^>]*\bid=["']post-(\d+)["'][^>]*>/gi;
+
+  let match;
+
+  while ((match = pattern.exec(html)) !== null) {
+    const id = Number(match[1]);
+
+    if (postIds.indexOf(id) === -1) {
+      postIds.push(id);
+    }
+  }
+
+  const posts = [];
+
+  for (
+    let i = 0;
+    i < postIds.length && posts.length < limit;
+    i++
+  ) {
+    try {
+      const post = await requestJson(
+        baseUrl() +
+          "/wp-json/wp/v2/posts/" +
+          postIds[i] +
+          "?_embed=1"
+      );
+
+      if (
+        post &&
+        Array.isArray(post.categories) &&
+        post.categories.indexOf(categoryId) !== -1
+      ) {
+        posts.push(post);
+      }
+    } catch (_) {}
+  }
+
+  return posts
+    .sort(function (a, b) {
+      return new Date(b.date).getTime() -
+        new Date(a.date).getTime();
+    })
+    .slice(0, limit);
+}
+
+
+
 async function getPosts(params) {
   const url =
     baseUrl() +
