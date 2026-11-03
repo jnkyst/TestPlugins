@@ -6,6 +6,156 @@
  * Implements: getHome, search, load, loadStreams
  */
 
+
+
+
+const ROGMOVIES_API = "https://rogmovies.im/wp-json/wp/v2";
+
+// Edit this list to choose which platform sections appear on Home.
+// Remove a platform name to hide its section.
+const SELECTED_PLATFORMS = [
+  "Netflix",
+  "Disney+ Hotstar",
+  "Amazon Prime",
+  "MX Player"
+];
+
+const PLATFORM_MATCHERS = {
+  "Netflix": (category) =>
+    category.slug === "netflix" ||
+    category.name.toLowerCase() === "netflix",
+
+  "Disney+ Hotstar": (category) => {
+    const value = `${category.name} ${category.slug}`.toLowerCase();
+    return value.includes("disney") || value.includes("hotstar");
+  },
+
+  "Amazon Prime": (category) => {
+    const value = `${category.name} ${category.slug}`.toLowerCase();
+    return value.includes("amazon prime") ||
+      value.includes("prime-video") ||
+      value.includes("prime video");
+  },
+
+  "MX Player": (category) => {
+    const value = `${category.name} ${category.slug}`.toLowerCase();
+    return value.includes("mx player") || value.includes("mx-player");
+  }
+};
+
+async function rogGetJson(url) {
+  const response = await http_get(url, {
+    headers: { Accept: "application/json" }
+  });
+
+  const status = response.statusCode || response.status;
+
+  if (status < 200 || status >= 300) {
+    throw new Error(`RogMovies API returned HTTP ${status}`);
+  }
+
+  return typeof response.body === "string"
+    ? JSON.parse(response.body)
+    : response.body;
+}
+
+function rogPostToItem(post) {
+  const embeddedImage =
+    post._embedded?.["wp:featuredmedia"]?.[0]?.source_url || "";
+
+  const poster =
+    post.fifu_image_url ||
+    post.meta?.fifu_image_url ||
+    embeddedImage ||
+    "";
+
+  const title = (post.title?.rendered || "Untitled")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&#8217;/g, "'")
+    .replace(/&#8211;/g, "–");
+
+  const description = (post.excerpt?.rendered || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return {
+    title,
+    url: `rogmovies:post:${post.id}`,
+    posterUrl: poster,
+    type: "series",
+    year: post.date ? post.date.slice(0, 4) : "",
+    description
+  };
+}
+
+async function rogGetPosts(params = "") {
+  const url =
+    `${ROGMOVIES_API}/posts?per_page=30&orderby=date&order=desc` +
+    `&_embed=wp:featuredmedia${params}`;
+
+  const posts = await rogGetJson(url);
+  return Array.isArray(posts) ? posts : [];
+}
+
+async function rogGetPlatformCategories() {
+  // Fetch the category list and identify categories by name/slug,
+  // instead of hard-coding WordPress category IDs.
+  const categories = await rogGetJson(
+    `${ROGMOVIES_API}/categories?per_page=100&hide_empty=true`
+  );
+
+  if (!Array.isArray(categories)) return [];
+
+  return SELECTED_PLATFORMS.map((platform) => {
+    const matcher = PLATFORM_MATCHERS[platform];
+    const category = matcher
+      ? categories.find(matcher)
+      : undefined;
+
+    return { platform, category };
+  });
+}
+
+async function getHome() {
+  try {
+    const [latestPosts, platformCategories] = await Promise.all([
+      rogGetPosts(),
+      rogGetPlatformCategories()
+    ]);
+
+    const data = {
+      "Trending": latestPosts.slice(0, 10).map(rogPostToItem),
+      "Latest Posts": latestPosts.map(rogPostToItem)
+    };
+
+    // Each platform section queries its own WordPress category.
+    // Posts from unrelated categories will not enter that section.
+    for (const entry of platformCategories) {
+      if (!entry.category) {
+        data[entry.platform] = [];
+        continue;
+      }
+
+      const posts = await rogGetPosts(
+        `&categories=${encodeURIComponent(entry.category.id)}`
+      );
+
+      data[entry.platform] = posts.map(rogPostToItem);
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Unable to load RogMovies home: ${error.message}`,
+      data: {}
+    };
+  }
+}
+
+
 (function () {
   "use strict";
 
