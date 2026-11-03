@@ -179,22 +179,34 @@ async function getPosts(params) {
   }
 
   async function getHome(cb) {
-    try {
-      const posts = await getPosts("per_page=30&page=1&orderby=date&order=desc");
-      const items = Array.isArray(posts) ? posts.map(toItem) : [];
-      const series = items.filter(function (item) { return item.type === "series"; });
-      const movies = items.filter(function (item) { return item.type === "movie"; });
+  try {
+    const netflix = await getPosts(
+    "categories=327&per_page=10&orderby=date&order=desc"
+    );
+    const latest = await getPosts(
+      "per_page=10&page=1&orderby=date&order=desc"
+    );
+    const hotstar = await getPosts(
+      "categories=11950&per_page=10&orderby=date&order=desc"
+    );
+    const prime = await getPosts(
+      "categories=932&per_page=10&orderby=date&order=desc"
+    );
 
-      const data = {};
-      if (items.length) data["Trending"] = items.slice(0, 10);
-      if (movies.length) data["Latest Movies"] = movies.slice(0, 20);
-      if (series.length) data["Latest Series"] = series.slice(0, 20);
-
-      cb({ success: true, data: data });
-    } catch (error) {
-      sendError(cb, error);
-    }
+    cb({
+      success: true,
+      data: {
+        "Trending": latest.slice(0, 5).map(toItem),
+        "Latest Posts": latest.map(toItem),
+        "Netflix": netflix.map(toItem),
+        "Disney+ Hotstar": hotstar.map(toItem),
+        "Amazon Prime Video": prime.map(toItem)
+      }
+    });
+  } catch (error) {
+    sendError(cb, error);
   }
+}
 
   
   async function search(query, pageOrCb, maybeCb) {
