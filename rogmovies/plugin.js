@@ -186,12 +186,12 @@ async function getPosts(params) {
     const latest = await getPosts(
       "per_page=10&page=1&orderby=date&order=desc"
     );
-    // const hotstar = await getPosts(
-    //   "categories=11950&per_page=10&orderby=date&order=desc"
-    // );
-   const prime = await getPosts(
-  "categories=932&per_page=10&orderby=date&order=desc"
-);
+    const hotstar = await getPosts(
+      "categories=11950&per_page=10&orderby=date&order=desc"
+    );
+   const prime = await getArchivePosts(
+      "/web-series/amazon-prime-video/",10,932
+    );
 
     cb({
       success: true,
