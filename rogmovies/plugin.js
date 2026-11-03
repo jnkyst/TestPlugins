@@ -189,8 +189,8 @@ async function getPosts(params) {
     const hotstar = await getPosts(
       "categories=11950&per_page=10&orderby=date&order=desc"
     );
-    const prime = await getPosts(
-      "categories=932&per_page=10&orderby=date&order=desc"
+   const prime = await getArchivePosts(
+      "/web-series/amazon-prime-video/",10,932
     );
 
     cb({
@@ -199,7 +199,6 @@ async function getPosts(params) {
         "Trending": latest.slice(0, 5).map(toItem),
         "Latest Posts": latest.map(toItem),
         "Netflix": netflix.map(toItem),
-        "Disney+ Hotstar": hotstar.map(toItem),
         "Amazon Prime Video": prime.map(toItem)
       }
     });
