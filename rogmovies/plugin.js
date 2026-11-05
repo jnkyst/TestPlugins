@@ -1,8 +1,6 @@
 (function () {
-  const DEFAULT_POSTER = "https://image.tmdb.org/t/p/w500/jbmZPjSfCdIHo269QZK203WZSm.jpg";
-
   /**
-   * Helper: Decodes HTML and Hex entities
+   * Decodes HTML and Hex entities
    */
   function decodeHtml(str) {
     if (!str) return "";
@@ -22,11 +20,11 @@
   }
 
   /**
-   * Helper: Guarantees safe absolute poster URL
+   * Sanitizes poster URLs to ensure valid absolute HTTPS links
    */
   function sanitizePoster(poster, baseUrl) {
     if (!poster || typeof poster !== "string" || poster.trim() === "" || poster.startsWith("data:image")) {
-      return DEFAULT_POSTER;
+      return "";
     }
     poster = poster.trim();
     if (poster.startsWith("//")) return "https:" + poster;
@@ -64,7 +62,33 @@
   }
 
   /**
-   * Robust Card Parser: Extracts cards directly from /download- post anchors
+   * Batch HTTP helper
+   */
+  async function requestAll(urls) {
+    const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.5",
+      Referer: base + "/",
+    };
+
+    if (typeof http_parallel === "function") {
+      try {
+        const reqs = urls.map((u) => ({ url: u, method: "GET", headers: headers }));
+        const responses = await http_parallel(reqs);
+        if (responses && responses.length === urls.length) {
+          return responses.map((r) => (typeof r === "string" ? r : r?.body || r?.data || ""));
+        }
+      } catch (_) {}
+    }
+
+    return Promise.all(urls.map((u) => request(u).catch(() => "")));
+  }
+
+  /**
+   * Card Parser that ignores the global <header> ticker and pairs each card with its real poster
    */
   function parseCards(html) {
     if (!html || typeof html !== "string") return [];
@@ -72,11 +96,18 @@
     const items = [];
     const cardMap = {};
 
-    // Match all anchors that link to movie/series posts
+    // 1. Strip out <header>...</header> to remove the repeating trending bar
+    let cleanHtml = html.replace(/<header[\s\S]*?<\/header>/gi, "");
+    const headerEndIdx = cleanHtml.toLowerCase().indexOf("</header>");
+    if (headerEndIdx !== -1) {
+      cleanHtml = cleanHtml.slice(headerEndIdx + 9);
+    }
+
+    // 2. Scan anchors linking to /download- posts
     const anchorRegex = /<a\s+[^>]*href=["'](https?:\/\/[^"']*\/download-[^"']+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
     let match;
 
-    while ((match = anchorRegex.exec(html)) !== null) {
+    while ((match = anchorRegex.exec(cleanHtml)) !== null) {
       let postUrl = match[1];
       const content = match[2];
 
@@ -88,7 +119,7 @@
         cardMap[postUrl] = { title: "", poster: "" };
       }
 
-      // 1. Extract poster image
+      // Extract poster image
       const imgMatch =
         content.match(/data-src=["']([^"']+)["']/i) ||
         content.match(/data-lazy-src=["']([^"']+)["']/i) ||
@@ -98,13 +129,13 @@
         cardMap[postUrl].poster = imgMatch[1];
       }
 
-      // 2. Extract title from alt attribute
+      // Extract title from alt attribute
       const altMatch = content.match(/alt=["']([^"']+)["']/i);
       if (altMatch && altMatch[1] && !cardMap[postUrl].title) {
         cardMap[postUrl].title = altMatch[1].trim();
       }
 
-      // 3. Extract title from inner text
+      // Extract title from inner text (ignoring "Download Now" labels)
       const cleanText = content.replace(/<[^>]*>?/gm, "").trim();
       if (
         cleanText &&
@@ -117,11 +148,10 @@
       }
     }
 
-    // Build the final list of cards
+    // 3. Construct clean media cards
     for (const [postUrl, data] of Object.entries(cardMap)) {
       let title = data.title;
 
-      // Fallback: derive title from URL slug if text was only "Download"
       if (!title) {
         const slug = postUrl.replace(/\/+$/, "").split("/").pop().replace(/^download-/i, "").replace(/-/g, " ");
         title = slug.replace(/\b\w/g, (c) => c.toUpperCase());
@@ -129,6 +159,10 @@
 
       title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
       const poster = sanitizePoster(data.poster, base);
+
+      // Only include cards that have their genuine poster thumbnail
+      if (!poster) continue;
+
       const isSeries = /season\s*\d+/i.test(title) || /TV-Show/i.test(title);
 
       const card = {
@@ -151,34 +185,28 @@
   }
 
   /**
-   * 1. getHome: Loads Trending, Latest Releases, Netflix, Amazon Prime, JioHotstar, SonyLiv
+   * 1. getHome: Loads Trending, Latest Releases, Netflix, Prime, JioHotstar, SonyLiv
    */
   async function getHome(cb) {
     try {
       const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
 
-      // 1. Fetch Homepage
-      const homeHtml = await request(base + "/");
-      const latestItems = parseCards(homeHtml);
-
-      // 2. Fetch Categories (Netflix, Prime, JioHotstar, SonyLiv)
       const catUrls = [
+        base + "/",
         base + "/web-series/netflix/",
         base + "/web-series/amazon-prime-video/",
         base + "/web-series/jiohotstar/",
         base + "/web-series/sonyliv/",
       ];
 
-      const [netflixHtml, primeHtml, hotstarHtml, sonylivHtml] = await Promise.all(
-        catUrls.map((u) => request(u).catch(() => ""))
-      );
+      const [homeHtml, netflixHtml, primeHtml, hotstarHtml, sonylivHtml] = await requestAll(catUrls);
 
+      const latestItems = parseCards(homeHtml);
       const netflixItems = parseCards(netflixHtml);
       const primeItems = parseCards(primeHtml);
       const hotstarItems = parseCards(hotstarHtml);
       const sonylivItems = parseCards(sonylivHtml);
 
-      // Master fallback pool to guarantee the hero carousel and rows never fail
       const pool = [
         ...latestItems,
         ...netflixItems,
@@ -193,11 +221,11 @@
         success: true,
         data: {
           "Trending": trending,
-          "Latest Releases": latestItems.length > 0 ? latestItems : pool.slice(0, 15),
-          "Netflix": netflixItems.length > 0 ? netflixItems : pool.slice(0, 10),
-          "Amazon Prime": primeItems.length > 0 ? primeItems : pool.slice(2, 12),
-          "JioHotstar": hotstarItems.length > 0 ? hotstarItems : pool.slice(4, 14),
-          "SonyLiv": sonylivItems.length > 0 ? sonylivItems : pool.slice(6, 16),
+          "Latest Releases": latestItems,
+          "Netflix": netflixItems,
+          "Amazon Prime": primeItems,
+          "JioHotstar": hotstarItems,
+          "SonyLiv": sonylivItems,
         },
       });
     } catch (err) {
