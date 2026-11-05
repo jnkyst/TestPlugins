@@ -1,6 +1,8 @@
 (function () {
+  const DEFAULT_POSTER = "https://image.tmdb.org/t/p/w500/jbmZPjSfCdIHo269QZK203WZSm.jpg";
+
   /**
-   * Decodes HTML and Hex entities
+   * Helper: Decodes HTML and Hex entities
    */
   function decodeHtml(str) {
     if (!str) return "";
@@ -20,25 +22,34 @@
   }
 
   /**
-   * HTTP client using SkyStream's native Dart bridge
+   * Helper: Guarantees safe absolute poster URL
+   */
+  function sanitizePoster(poster, baseUrl) {
+    if (!poster || typeof poster !== "string" || poster.trim() === "" || poster.startsWith("data:image")) {
+      return DEFAULT_POSTER;
+    }
+    poster = poster.trim();
+    if (poster.startsWith("//")) return "https:" + poster;
+    if (poster.startsWith("/")) return baseUrl + poster;
+    if (!poster.startsWith("http")) return baseUrl + "/" + poster;
+    return poster;
+  }
+
+  /**
+   * Safe HTTP client using SkyStream's native Dart bridge
    */
   async function request(url) {
+    const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
     const headers = {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      Accept: "application/json, text/html, */*",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.5",
-      Referer: "https://rogmovies.im/",
+      Referer: base + "/",
     };
 
     if (typeof http_parallel === "function") {
-      const res = await http_parallel([
-        {
-          url: url,
-          method: "GET",
-          headers: headers,
-        },
-      ]);
+      const res = await http_parallel([{ url: url, method: "GET", headers: headers }]);
       if (res && res[0]) {
         return typeof res[0] === "string" ? res[0] : res[0].body || res[0].data || "";
       }
@@ -53,92 +64,140 @@
   }
 
   /**
-   * RogMovies Card Parser for HTML Home & Catalog pages
+   * Robust Card Parser: Extracts cards directly from /download- post anchors
    */
   function parseCards(html) {
+    if (!html || typeof html !== "string") return [];
+    const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
     const items = [];
-    const seenUrls = new Set();
+    const cardMap = {};
 
-    const liRegex = /<li[\s\S]*?<\/li>/gi;
-    const listItems = html.match(liRegex) || [];
+    // Match all anchors that link to movie/series posts
+    const anchorRegex = /<a\s+[^>]*href=["'](https?:\/\/[^"']*\/download-[^"']+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
 
-    for (const block of listItems) {
-      const dlLinkMatch =
-        block.match(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?Download Now[\s\S]*?<\/a>/i) ||
-        block.match(/<h[2-4][^>]*>\s*<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i) ||
-        block.match(/<a\s+[^>]*href=["'](https?:\/\/[^"']*\/(?:download-)?[^"']+\/?)["'][^>]*>/i);
+    while ((match = anchorRegex.exec(html)) !== null) {
+      let postUrl = match[1];
+      const content = match[2];
 
-      if (!dlLinkMatch || !dlLinkMatch[1]) continue;
-
-      let postUrl = dlLinkMatch[1];
       if (postUrl.startsWith("/")) {
-        postUrl = "https://rogmovies.im" + postUrl;
+        postUrl = base + postUrl;
       }
 
-      if (
-        seenUrls.has(postUrl) ||
-        postUrl === "https://rogmovies.im/" ||
-        postUrl.includes("/category/") ||
-        postUrl.includes("/genre/") ||
-        postUrl.includes("/page/") ||
-        postUrl.includes("/dmca") ||
-        postUrl.includes("/telegram") ||
-        postUrl.includes("how-to")
-      ) {
-        continue;
+      if (!cardMap[postUrl]) {
+        cardMap[postUrl] = { title: "", poster: "" };
       }
 
-      let rawTitle = "";
-      const headingMatch = block.match(/<h[2-4][^>]*>([\s\S]*?)<\/h[2-4]>/i);
-      const altMatch = block.match(/<img\s+[^>]*alt=["']([^"']+)["']/i);
-
-      if (headingMatch) {
-        rawTitle = headingMatch[1].replace(/<[^>]*>?/gm, "").trim();
-      } else if (altMatch && altMatch[1]) {
-        rawTitle = altMatch[1].trim();
-      } else if (dlLinkMatch[2]) {
-        rawTitle = dlLinkMatch[2].replace(/<[^>]*>?/gm, "").trim();
-      }
-
-      let title = decodeHtml(rawTitle).replace(/^Download\s+/i, "").trim();
-
-      let poster = "";
+      // 1. Extract poster image
       const imgMatch =
-        block.match(/data-src=["']([^"']+)["']/i) ||
-        block.match(/data-lazy-src=["']([^"']+)["']/i) ||
-        block.match(/src=["']([^"']+)["']/i);
+        content.match(/data-src=["']([^"']+)["']/i) ||
+        content.match(/data-lazy-src=["']([^"']+)["']/i) ||
+        content.match(/src=["']([^"']+)["']/i);
 
-      if (imgMatch && !imgMatch[1].startsWith("data:image")) {
-        poster = imgMatch[1];
+      if (imgMatch && !imgMatch[1].startsWith("data:image") && !cardMap[postUrl].poster) {
+        cardMap[postUrl].poster = imgMatch[1];
       }
 
-      if (postUrl && title && title.length > 2) {
-        seenUrls.add(postUrl);
-        items.push({
-          title: title,
-          url: postUrl,
-          posterUrl: poster,
-          type: /season\s*\d+/i.test(title) ? "series" : "movie",
-        });
+      // 2. Extract title from alt attribute
+      const altMatch = content.match(/alt=["']([^"']+)["']/i);
+      if (altMatch && altMatch[1] && !cardMap[postUrl].title) {
+        cardMap[postUrl].title = altMatch[1].trim();
       }
+
+      // 3. Extract title from inner text
+      const cleanText = content.replace(/<[^>]*>?/gm, "").trim();
+      if (
+        cleanText &&
+        cleanText.length > 3 &&
+        !cleanText.toLowerCase().includes("download now") &&
+        !cleanText.toLowerCase().includes("join") &&
+        !cardMap[postUrl].title
+      ) {
+        cardMap[postUrl].title = cleanText;
+      }
+    }
+
+    // Build the final list of cards
+    for (const [postUrl, data] of Object.entries(cardMap)) {
+      let title = data.title;
+
+      // Fallback: derive title from URL slug if text was only "Download"
+      if (!title) {
+        const slug = postUrl.replace(/\/+$/, "").split("/").pop().replace(/^download-/i, "").replace(/-/g, " ");
+        title = slug.replace(/\b\w/g, (c) => c.toUpperCase());
+      }
+
+      title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
+      const poster = sanitizePoster(data.poster, base);
+      const isSeries = /season\s*\d+/i.test(title) || /TV-Show/i.test(title);
+
+      const card = {
+        title: title,
+        url: postUrl,
+        posterUrl: poster,
+        type: isSeries ? "series" : "movie",
+      };
+
+      if (typeof MultimediaItem !== "undefined") {
+        try {
+          items.push(new MultimediaItem(card));
+          continue;
+        } catch (_) {}
+      }
+      items.push(card);
     }
 
     return items;
   }
 
   /**
-   * 1. getHome
+   * 1. getHome: Loads Trending, Latest Releases, Netflix, Amazon Prime, JioHotstar, SonyLiv
    */
   async function getHome(cb) {
     try {
       const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
-      const html = await request(base);
-      const items = parseCards(html);
+
+      // 1. Fetch Homepage
+      const homeHtml = await request(base + "/");
+      const latestItems = parseCards(homeHtml);
+
+      // 2. Fetch Categories (Netflix, Prime, JioHotstar, SonyLiv)
+      const catUrls = [
+        base + "/web-series/netflix/",
+        base + "/web-series/amazon-prime-video/",
+        base + "/web-series/jiohotstar/",
+        base + "/web-series/sonyliv/",
+      ];
+
+      const [netflixHtml, primeHtml, hotstarHtml, sonylivHtml] = await Promise.all(
+        catUrls.map((u) => request(u).catch(() => ""))
+      );
+
+      const netflixItems = parseCards(netflixHtml);
+      const primeItems = parseCards(primeHtml);
+      const hotstarItems = parseCards(hotstarHtml);
+      const sonylivItems = parseCards(sonylivHtml);
+
+      // Master fallback pool to guarantee the hero carousel and rows never fail
+      const pool = [
+        ...latestItems,
+        ...netflixItems,
+        ...primeItems,
+        ...hotstarItems,
+        ...sonylivItems,
+      ];
+
+      const trending = latestItems.length > 0 ? latestItems.slice(0, 6) : pool.slice(0, 6);
 
       cb({
         success: true,
         data: {
-          "Latest Releases": items,
+          "Trending": trending,
+          "Latest Releases": latestItems.length > 0 ? latestItems : pool.slice(0, 15),
+          "Netflix": netflixItems.length > 0 ? netflixItems : pool.slice(0, 10),
+          "Amazon Prime": primeItems.length > 0 ? primeItems : pool.slice(2, 12),
+          "JioHotstar": hotstarItems.length > 0 ? hotstarItems : pool.slice(4, 14),
+          "SonyLiv": sonylivItems.length > 0 ? sonylivItems : pool.slice(6, 16),
         },
       });
     } catch (err) {
@@ -147,7 +206,7 @@
   }
 
   /**
-   * 2. search: Directly targets RogMovies' /ts-search.php backend
+   * 2. search: Uses RogMovies Typesense API
    */
   async function search(query, cb) {
     try {
@@ -165,13 +224,22 @@
             if (doc && doc.permalink) {
               const rawTitle = doc.post_title || "Unknown";
               const title = decodeHtml(rawTitle).replace(/^Download\s+/i, "").trim();
+              const isSeries = /season\s*\d+/i.test(title);
 
-              items.push({
+              const card = {
                 title: title,
                 url: doc.permalink,
-                posterUrl: doc.post_thumbnail || "",
-                type: /season\s*\d+/i.test(title) ? "series" : "movie",
-              });
+                posterUrl: sanitizePoster(doc.post_thumbnail, base),
+                type: isSeries ? "series" : "movie",
+              };
+
+              if (typeof MultimediaItem !== "undefined") {
+                try {
+                  items.push(new MultimediaItem(card));
+                  continue;
+                } catch (_) {}
+              }
+              items.push(card);
             }
           }
         }
@@ -193,6 +261,7 @@
    */
   async function load(url, cb) {
     try {
+      const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
       const html = await request(url);
 
       const titleMatch =
@@ -216,6 +285,8 @@
           }
         }
       }
+
+      poster = sanitizePoster(poster, base);
 
       let synopsis = "";
       const plotMatch =
@@ -245,7 +316,7 @@
           lowerLink.includes("vegamovies-apk") ||
           lowerLink.includes("vglist") ||
           lowerLink.includes("telegram") ||
-          lowerLink.includes("movies-by-quality") ||
+          lowerLink.includes("movies-by-") ||
           lowerLink.includes("#comment") ||
           seenLinks.has(rawLink)
         ) {
@@ -343,7 +414,7 @@
         });
       }
 
-      // Embed fallback
+      // Fallback: Pass embed player to SkyStream's internal player
       if (streams.length === 0 && currentUrl.includes("fastdl")) {
         streams.push({
           url: currentUrl,
@@ -361,7 +432,7 @@
     }
   }
 
-  // Register in global scope for SkyStream
+  // Register methods globally for SkyStream
   globalThis.getHome = getHome;
   globalThis.search = search;
   globalThis.load = load;
