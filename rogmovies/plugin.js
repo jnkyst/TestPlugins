@@ -88,7 +88,7 @@
   }
 
   /**
-   * Card Parser that ignores the global <header> ticker and pairs each card with its real poster
+   * Precise Card Parser (ignores <header> ticker and requires genuine image)
    */
   function parseCards(html) {
     if (!html || typeof html !== "string") return [];
@@ -96,14 +96,12 @@
     const items = [];
     const cardMap = {};
 
-    // 1. Strip out <header>...</header> to remove the repeating trending bar
     let cleanHtml = html.replace(/<header[\s\S]*?<\/header>/gi, "");
     const headerEndIdx = cleanHtml.toLowerCase().indexOf("</header>");
     if (headerEndIdx !== -1) {
       cleanHtml = cleanHtml.slice(headerEndIdx + 9);
     }
 
-    // 2. Scan anchors linking to /download- posts
     const anchorRegex = /<a\s+[^>]*href=["'](https?:\/\/[^"']*\/download-[^"']+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
     let match;
 
@@ -119,7 +117,6 @@
         cardMap[postUrl] = { title: "", poster: "" };
       }
 
-      // Extract poster image
       const imgMatch =
         content.match(/data-src=["']([^"']+)["']/i) ||
         content.match(/data-lazy-src=["']([^"']+)["']/i) ||
@@ -129,13 +126,11 @@
         cardMap[postUrl].poster = imgMatch[1];
       }
 
-      // Extract title from alt attribute
       const altMatch = content.match(/alt=["']([^"']+)["']/i);
       if (altMatch && altMatch[1] && !cardMap[postUrl].title) {
         cardMap[postUrl].title = altMatch[1].trim();
       }
 
-      // Extract title from inner text (ignoring "Download Now" labels)
       const cleanText = content.replace(/<[^>]*>?/gm, "").trim();
       if (
         cleanText &&
@@ -148,7 +143,6 @@
       }
     }
 
-    // 3. Construct clean media cards
     for (const [postUrl, data] of Object.entries(cardMap)) {
       let title = data.title;
 
@@ -160,7 +154,6 @@
       title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
       const poster = sanitizePoster(data.poster, base);
 
-      // Only include cards that have their genuine poster thumbnail
       if (!poster) continue;
 
       const isSeries = /season\s*\d+/i.test(title) || /TV-Show/i.test(title);
@@ -185,7 +178,7 @@
   }
 
   /**
-   * 1. getHome: Loads Trending, Latest Releases, Netflix, Prime, JioHotstar, SonyLiv
+   * 1. getHome: Loads completely deduplicated categories
    */
   async function getHome(cb) {
     try {
@@ -201,31 +194,44 @@
 
       const [homeHtml, netflixHtml, primeHtml, hotstarHtml, sonylivHtml] = await requestAll(catUrls);
 
-      const latestItems = parseCards(homeHtml);
-      const netflixItems = parseCards(netflixHtml);
-      const primeItems = parseCards(primeHtml);
-      const hotstarItems = parseCards(hotstarHtml);
-      const sonylivItems = parseCards(sonylivHtml);
+      const rawLatest = parseCards(homeHtml);
+      const rawNetflix = parseCards(netflixHtml);
+      const rawPrime = parseCards(primeHtml);
+      const rawHotstar = parseCards(hotstarHtml);
+      const rawSonyliv = parseCards(sonylivHtml);
 
-      const pool = [
-        ...latestItems,
-        ...netflixItems,
-        ...primeItems,
-        ...hotstarItems,
-        ...sonylivItems,
-      ];
+      // 1. Pick top 6 for the Hero Banner ("Trending")
+      const trending = rawLatest.slice(0, 6);
+      const trendingUrls = new Set(trending.map((i) => i.url));
 
-      const trending = latestItems.length > 0 ? latestItems.slice(0, 6) : pool.slice(0, 6);
+      // Collect all OTT URLs so Latest Releases only contains non-OTT / theatrical movies
+      const ottUrls = new Set([
+        ...rawNetflix.map((i) => i.url),
+        ...rawPrime.map((i) => i.url),
+        ...rawHotstar.map((i) => i.url),
+        ...rawSonyliv.map((i) => i.url),
+      ]);
+
+      // 2. Filter Latest Releases: Exclude Trending items AND items present in OTT categories
+      const cleanLatest = rawLatest.filter(
+        (i) => !trendingUrls.has(i.url) && !ottUrls.has(i.url)
+      );
+
+      // 3. Filter OTT categories: Exclude any item already showcased in the Hero Banner
+      const cleanNetflix = rawNetflix.filter((i) => !trendingUrls.has(i.url));
+      const cleanPrime = rawPrime.filter((i) => !trendingUrls.has(i.url));
+      const cleanHotstar = rawHotstar.filter((i) => !trendingUrls.has(i.url));
+      const cleanSonyliv = rawSonyliv.filter((i) => !trendingUrls.has(i.url));
 
       cb({
         success: true,
         data: {
           "Trending": trending,
-          "Latest Releases": latestItems,
-          "Netflix": netflixItems,
-          "Amazon Prime": primeItems,
-          "JioHotstar": hotstarItems,
-          "SonyLiv": sonylivItems,
+          "Latest Releases": cleanLatest.length > 0 ? cleanLatest : rawLatest.slice(6, 20),
+          "Netflix": cleanNetflix,
+          "Amazon Prime": cleanPrime,
+          "JioHotstar": cleanHotstar,
+          "SonyLiv": cleanSonyliv,
         },
       });
     } catch (err) {
