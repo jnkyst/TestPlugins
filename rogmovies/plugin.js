@@ -1,957 +1,367 @@
-
-/*
- * RogMovies — SkyStream Gen 2 plugin
- * WordPress REST API source: https://rogmovies.im
- *
- * Implements: getHome, search, load, loadStreams
- */
-
-
-
-
-const ROGMOVIES_API = "https://rogmovies.im/wp-json/wp/v2";
-
-// Edit this list to choose which platform sections appear on Home.
-// Remove a platform name to hide its section.
-const SELECTED_PLATFORMS = [
-  "Netflix",
-  "Disney+ Hotstar",
-  "Amazon Prime",
-  "MX Player"
-];
-
-const PLATFORM_MATCHERS = {
-  "Netflix": (category) =>
-    category.slug === "netflix" ||
-    category.name.toLowerCase() === "netflix",
-
-  "Disney+ Hotstar": (category) => {
-    const value = `${category.name} ${category.slug}`.toLowerCase();
-    return value.includes("disney") || value.includes("hotstar");
-  },
-
-  "Amazon Prime": (category) => {
-    const value = `${category.name} ${category.slug}`.toLowerCase();
-    return value.includes("amazon prime") ||
-      value.includes("prime-video") ||
-      value.includes("prime video");
-  },
-
-  "MX Player": (category) => {
-    const value = `${category.name} ${category.slug}`.toLowerCase();
-    return value.includes("mx player") || value.includes("mx-player");
-  }
-};
-
-async function rogGetJson(url) {
-  const response = await http_get(url, {
-    headers: { Accept: "application/json" }
-  });
-
-  const status = response.statusCode || response.status;
-
-  if (status < 200 || status >= 300) {
-    throw new Error(`RogMovies API returned HTTP ${status}`);
-  }
-
-  return typeof response.body === "string"
-    ? JSON.parse(response.body)
-    : response.body;
-}
-
-function rogPostToItem(post) {
-  const embeddedImage =
-    post._embedded?.["wp:featuredmedia"]?.[0]?.source_url || "";
-
-  const poster =
-    post.fifu_image_url ||
-    post.meta?.fifu_image_url ||
-    embeddedImage ||
-    "";
-
-  const title = (post.title?.rendered || "Untitled")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&#8217;/g, "'")
-    .replace(/&#8211;/g, "–");
-
-  const description = (post.excerpt?.rendered || "")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return {
-    title,
-    url: `rogmovies:post:${post.id}`,
-    posterUrl: poster,
-    type: "series",
-    year: post.date ? post.date.slice(0, 4) : "",
-    description
-  };
-}
-
-async function rogGetPosts(params = "") {
-  const url =
-    `${ROGMOVIES_API}/posts?per_page=30&orderby=date&order=desc` +
-    `&_embed=wp:featuredmedia${params}`;
-
-  const posts = await rogGetJson(url);
-  return Array.isArray(posts) ? posts : [];
-}
-
-async function rogGetPlatformCategories() {
-  // Fetch the category list and identify categories by name/slug,
-  // instead of hard-coding WordPress category IDs.
-  const categories = await rogGetJson(
-    `${ROGMOVIES_API}/categories?per_page=100&hide_empty=true`
-  );
-
-  if (!Array.isArray(categories)) return [];
-
-  return SELECTED_PLATFORMS.map((platform) => {
-    const matcher = PLATFORM_MATCHERS[platform];
-    const category = matcher
-      ? categories.find(matcher)
-      : undefined;
-
-    return { platform, category };
-  });
-}
-
-async function getHome() {
-  try {
-    const [latestPosts, platformCategories] = await Promise.all([
-      rogGetPosts(),
-      rogGetPlatformCategories()
-    ]);
-
-    const data = {
-      "Trending": latestPosts.slice(0, 10).map(rogPostToItem),
-      "Latest Posts": latestPosts.map(rogPostToItem)
-    };
-
-    // Each platform section queries its own WordPress category.
-    // Posts from unrelated categories will not enter that section.
-    for (const entry of platformCategories) {
-      if (!entry.category) {
-        data[entry.platform] = [];
-        continue;
-      }
-
-      const posts = await rogGetPosts(
-        `&categories=${encodeURIComponent(entry.category.id)}`
-      );
-
-      data[entry.platform] = posts.map(rogPostToItem);
-    }
-
-    return { success: true, data };
-  } catch (error) {
-    return {
-      success: false,
-      error: `Unable to load RogMovies home: ${error.message}`,
-      data: {}
-    };
-  }
-}
-
-
 (function () {
-  "use strict";
-
-  const API_FIELDS =
-  "id,date,link,title,excerpt,content,meta,categories,class_list,fifu_image_url,_embedded";
-  const DEFAULT_POSTER = "https://rogmovies.im/wp-content/uploads/placeholder.jpg";
-
-  function baseUrl() {
-    const configured =
-      (typeof manifest !== "undefined" && manifest && manifest.baseUrl)
-        ? manifest.baseUrl
-        : "https://rogmovies.im";
-    return String(configured).replace(/\/+$/, "");
-  }
-
-  function cleanText(value) {
-    return String(value || "")
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]*>/g, " ")
-      .replace(/&nbsp;|&#160;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/&quot;/gi, '"')
-      .replace(/&#0*39;|&apos;/gi, "'")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/&#(\d+);/g, function (_, n) {
-        return String.fromCharCode(Number(n));
-      })
-      .replace(/&#x([0-9a-f]+);/gi, function (_, n) {
-        return String.fromCharCode(parseInt(n, 16));
-      })
-      .replace(/\s+/g, " ")
+  /**
+   * Decodes HTML and Hex entities
+   */
+  function decodeHtml(str) {
+    if (!str) return "";
+    return str
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+      .replace(/&#038;/g, "&")
+      .replace(/&#8211;/g, "–")
+      .replace(/&#8212;/g, "—")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&nbsp;/g, " ")
       .trim();
   }
 
-  function getTitle(post) {
-    return cleanText(post && post.title && post.title.rendered) || "Untitled";
-  }
-
-  function getDescription(post) {
-    return cleanText(
-      (post && post.excerpt && post.excerpt.rendered) ||
-      (post && post.content && post.content.rendered) ||
-      ""
-    );
-  }
-
-  function getPoster(post) {
-    const embedded =
-      post && post._embedded && post._embedded["wp:featuredmedia"] &&
-      post._embedded["wp:featuredmedia"][0] &&
-      post._embedded["wp:featuredmedia"][0].source_url;
-
-    return (
-      (post && post.fifu_image_url) ||
-      (post && post.meta && post.meta.fifu_image_url) ||
-      embedded ||
-      DEFAULT_POSTER
-    );
-  }
-
-  function getYear(post) {
-    const titleYear = getTitle(post).match(/\b(19|20)\d{2}\b/);
-    const dateYear = String(post && post.date || "").match(/^\d{4}/);
-    return titleYear ? Number(titleYear[0]) : (dateYear ? Number(dateYear[0]) : undefined);
-  }
-
-  function isSeries(post) {
-    const title = getTitle(post);
-    const classes = Array.isArray(post && post.class_list) ? post.class_list.join(" ") : "";
-
-    return (
-      /\b(web[\s-]?series|series|season|s\d{1,2}\s*e\d{1,2}|complete\s+series)\b/i.test(title) ||
-      /category-(web-series|tv-series|series)\b/i.test(classes)
-    );
-  }
-
-  function toItem(post) {
-    return {
-      title: getTitle(post),
-      url: "rogmovies:post:" + String(post.id),
-      posterUrl: getPoster(post),
-      type: isSeries(post) ? "series" : "movie",
-      year: getYear(post),
-      description: getDescription(post)
+  /**
+   * HTTP client using SkyStream's native Dart bridge
+   */
+  async function request(url) {
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      Accept: "application/json, text/html, */*",
+      "Accept-Language": "en-US,en;q=0.5",
+      Referer: "https://rogmovies.im/",
     };
-  }
 
-  // Use SkyStream's native HTTP helper. Browser fetch() is unavailable.
-  async function requestText(url, accept) {
-    if (typeof http_get !== "function") {
-      throw new Error("SkyStream HTTP helper http_get() is unavailable.");
+    if (typeof http_parallel === "function") {
+      const res = await http_parallel([
+        {
+          url: url,
+          method: "GET",
+          headers: headers,
+        },
+      ]);
+      if (res && res[0]) {
+        return typeof res[0] === "string" ? res[0] : res[0].body || res[0].data || "";
+      }
     }
 
-    const response = await http_get(url, {
-      Accept: accept || "*/*",
-      "Cache-Control": "no-cache",
-      "User-Agent": "Mozilla/5.0"
-    });
-
-    if (!response || response.status < 200 || response.status >= 300) {
-      const status = response ? response.status : "no response";
-      throw new Error("HTTP request failed (" + status + "): " + url);
+    if (typeof fetch === "function") {
+      const res = await fetch(url, { headers });
+      return await res.text();
     }
 
-    return String(response.body || "");
+    throw new Error("No HTTP client found.");
   }
 
-  async function requestJson(url) {
-    const body = await requestText(url, "application/json");
+  /**
+   * RogMovies Card Parser for HTML Home & Catalog pages
+   */
+  function parseCards(html) {
+    const items = [];
+    const seenUrls = new Set();
 
-    try {
-      return JSON.parse(body);
-    } catch (error) {
-      throw new Error("WordPress API returned invalid JSON: " + url);
-    }
-  }
+    const liRegex = /<li[\s\S]*?<\/li>/gi;
+    const listItems = html.match(liRegex) || [];
 
- 
+    for (const block of listItems) {
+      const dlLinkMatch =
+        block.match(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?Download Now[\s\S]*?<\/a>/i) ||
+        block.match(/<h[2-4][^>]*>\s*<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i) ||
+        block.match(/<a\s+[^>]*href=["'](https?:\/\/[^"']*\/(?:download-)?[^"']+\/?)["'][^>]*>/i);
 
-async function getArchivePosts(path, limit, categoryId) {
-  const archiveUrl = baseUrl() + path;
-  const html = await requestText(
-    archiveUrl,
-    "text/html,*/*"
-  );
+      if (!dlLinkMatch || !dlLinkMatch[1]) continue;
 
-  const postIds = [];
-  const pattern =
-    /<article\b[^>]*\bid=["']post-(\d+)["'][^>]*>/gi;
-
-  let match;
-
-  while ((match = pattern.exec(html)) !== null) {
-    const id = Number(match[1]);
-
-    if (postIds.indexOf(id) === -1) {
-      postIds.push(id);
-    }
-  }
-
-  const posts = [];
-
-  for (
-    let i = 0;
-    i < postIds.length && posts.length < limit;
-    i++
-  ) {
-    try {
-      const post = await requestJson(
-        baseUrl() +
-          "/wp-json/wp/v2/posts/" +
-          postIds[i] +
-          "?_embed=1"
-      );
+      let postUrl = dlLinkMatch[1];
+      if (postUrl.startsWith("/")) {
+        postUrl = "https://rogmovies.im" + postUrl;
+      }
 
       if (
-        post &&
-        Array.isArray(post.categories) &&
-        post.categories.indexOf(categoryId) !== -1
+        seenUrls.has(postUrl) ||
+        postUrl === "https://rogmovies.im/" ||
+        postUrl.includes("/category/") ||
+        postUrl.includes("/genre/") ||
+        postUrl.includes("/page/") ||
+        postUrl.includes("/dmca") ||
+        postUrl.includes("/telegram") ||
+        postUrl.includes("how-to")
       ) {
-        posts.push(post);
+        continue;
       }
-    } catch (_) {}
-  }
 
-  return posts
-    .sort(function (a, b) {
-      return new Date(b.date).getTime() -
-        new Date(a.date).getTime();
-    })
-    .slice(0, limit);
-}
+      let rawTitle = "";
+      const headingMatch = block.match(/<h[2-4][^>]*>([\s\S]*?)<\/h[2-4]>/i);
+      const altMatch = block.match(/<img\s+[^>]*alt=["']([^"']+)["']/i);
 
-
-
-async function getPosts(params) {
-  const url =
-    baseUrl() +
-    "/wp-json/wp/v2/posts/?" +
-    params +
-    "&_embed=1&_fields=" +
-    encodeURIComponent(API_FIELDS);
-
-  // First retrieve the list of post IDs.
-  const summaries = await requestJson(url);
-
-  if (!Array.isArray(summaries)) {
-    throw new Error("WordPress posts API did not return a list.");
-  }
-
-  // Then retrieve complete details for each post.
-  const posts = [];
-
-  for (let i = 0; i < summaries.length; i += 5) {
-    const batch = summaries.slice(i, i + 5);
-
-    const details = await Promise.all(
-      batch.map(async function (post) {
-        if (!post || !post.id) return null;
-
-        const detailUrl =
-          baseUrl() +
-          "/wp-json/wp/v2/posts/" +
-          post.id +
-          "?_embed=1";
-
-        return await requestJson(detailUrl);
-      })
-    );
-
-    for (const post of details) {
-      if (post) posts.push(post);
-    }
-  }
-
-  return posts;
-}
-
-
-  function sendError(cb, error, code) {
-    cb({
-      success: false,
-      errorCode: code || "NETWORK_ERROR",
-      message: String(error && error.message ? error.message : error)
-    });
-  }
-
-  async function getHome(cb) {
-  try {
-    const netflix = await getPosts(
-    "categories=327&per_page=10&orderby=date&order=desc"
-    );
-    const latest = await getPosts(
-      "per_page=10&page=1&orderby=date&order=desc"
-    );
-    const hotstar = await getPosts(
-      "categories=11950&per_page=10&orderby=date&order=desc"
-    );
-    const prime = await getPosts(
-    "categories=932&per_page=10&orderby=date&order=desc"
-    );
-
-    cb({
-      success: true,
-      data: {
-        "Trending": latest.slice(0, 5).map(toItem),
-        "Latest Posts": latest.map(toItem),
-        "Netflix": netflix.map(toItem),
-        "Amazon Prime Video": prime.map(toItem)
+      if (headingMatch) {
+        rawTitle = headingMatch[1].replace(/<[^>]*>?/gm, "").trim();
+      } else if (altMatch && altMatch[1]) {
+        rawTitle = altMatch[1].trim();
+      } else if (dlLinkMatch[2]) {
+        rawTitle = dlLinkMatch[2].replace(/<[^>]*>?/gm, "").trim();
       }
-    });
-  } catch (error) {
-    sendError(cb, error);
-  }
-}
 
-  
-  async function search(query, pageOrCb, maybeCb) {
-    const page = typeof pageOrCb === "number" ? pageOrCb : 1;
-    const cb = typeof pageOrCb === "function" ? pageOrCb : maybeCb;
-    if (typeof cb !== "function") return;
+      let title = decodeHtml(rawTitle).replace(/^Download\s+/i, "").trim();
 
-    try {
-      const terms = String(query || "")
-        .toLowerCase()
-        .trim()
-        .split(/\s+/)
-        .filter(function (word) {
-          return word.length > 1 &&
-            !["the", "a", "an", "and", "or", "in", "on", "of", "to"].includes(word);
+      let poster = "";
+      const imgMatch =
+        block.match(/data-src=["']([^"']+)["']/i) ||
+        block.match(/data-lazy-src=["']([^"']+)["']/i) ||
+        block.match(/src=["']([^"']+)["']/i);
+
+      if (imgMatch && !imgMatch[1].startsWith("data:image")) {
+        poster = imgMatch[1];
+      }
+
+      if (postUrl && title && title.length > 2) {
+        seenUrls.add(postUrl);
+        items.push({
+          title: title,
+          url: postUrl,
+          posterUrl: poster,
+          type: /season\s*\d+/i.test(title) ? "series" : "movie",
         });
-
-      if (!terms.length) {
-        return cb({ success: true, data: [] });
       }
+    }
 
-      // Read the sitemap index.
-      const indexXml = await requestText(
-        baseUrl() + "/sitemap.xml",
-        "application/xml,text/xml,*/*"
-      );
+    return items;
+  }
 
-      // Find all post sitemap URLs.
-      const sitemapUrls = [];
-      const sitemapPattern = /<loc>\s*([^<]+)\s*<\/loc>/gi;
-      let sitemapMatch;
-
-      while ((sitemapMatch = sitemapPattern.exec(indexXml)) !== null) {
-        const sitemapUrl = cleanText(sitemapMatch[1]);
-
-        if (/\/post-sitemap\d*\.xml(?:\?|$)/i.test(sitemapUrl)) {
-          sitemapUrls.push(sitemapUrl);
-        }
-      }
-
-      if (!sitemapUrls.length) {
-        throw new Error("No post sitemaps were found.");
-      }
-
-      // Download all post sitemaps.
-      const sitemapResults = await Promise.all(
-        sitemapUrls.map(async function (url) {
-          try {
-            return await requestText(url, "application/xml,text/xml,*/*");
-          } catch (_) {
-            return "";
-          }
-        })
-      );
-
-      // Collect post URLs whose slugs contain every search term.
-      const candidates = [];
-      const seen = {};
-
-      for (const xml of sitemapResults) {
-        const locPattern = /<loc>\s*([^<]+)\s*<\/loc>/gi;
-        let match;
-
-        while ((match = locPattern.exec(xml)) !== null) {
-          const postUrl = cleanText(match[1]);
-
-          if (!/^https:\/\/rogmovies\.im\//i.test(postUrl)) continue;
-
-          let slug = "";
-          try {
-            const parsed = new URL(postUrl);
-            const parts = parsed.pathname.split("/").filter(Boolean);
-            slug = decodeURIComponent(parts[parts.length - 1] || "")
-              .toLowerCase();
-          } catch (_) {
-            continue;
-          }
-
-          if (!slug || seen[postUrl]) continue;
-
-          const matches = terms.every(function (term) {
-            return slug.indexOf(term) !== -1;
-          });
-
-          if (matches) {
-            seen[postUrl] = true;
-            candidates.push(postUrl);
-          }
-        }
-      }
-
-      // Apply pagination.
-      const pageSize = 20;
-      const start = (Math.max(1, page) - 1) * pageSize;
-      const selected = candidates.slice(start, start + pageSize);
-
-      // Read metadata from each matching movie page.
-      const items = await Promise.all(
-        selected.map(async function (postUrl) {
-          try {
-            const html = await requestText(
-              postUrl,
-              "text/html,application/xhtml+xml,*/*"
-            );
-
-            function getMeta(name) {
-              const tags = html.match(/<meta\b[^>]*>/gi) || [];
-
-              for (const tag of tags) {
-                const keyMatch = tag.match(
-                  /\b(?:property|name)\s*=\s*["']([^"']+)["']/i
-                );
-
-                if (!keyMatch ||
-                    keyMatch[1].toLowerCase() !== name.toLowerCase()) {
-                  continue;
-                }
-
-                const contentMatch = tag.match(
-                  /\bcontent\s*=\s*["']([^"']*)["']/i
-                );
-
-                if (contentMatch) return cleanText(contentMatch[1]);
-              }
-
-              return "";
-            }
-
-            const title = getMeta("og:title") ||
-              getMeta("twitter:title");
-
-            const description = getMeta("og:description") ||
-              getMeta("description");
-
-            const poster = getMeta("og:image") ||
-              getMeta("twitter:image");
-
-            // The RogMovies poster URL contains the WordPress post ID.
-            const idMatch = poster.match(/[?&]p=(\d+)/i);
-
-            if (!title || !idMatch) return null;
-
-            const yearMatch = title.match(/\b(19|20)\d{2}\b/);
-            const series = /\b(web[\s-]?series|series|season|S\d{1,2}\s*E\d{1,2})\b/i
-              .test(title);
-
-            return {
-              title: title,
-              url: "rogmovies:post:" + idMatch[1],
-              posterUrl: poster || DEFAULT_POSTER,
-              type: series ? "series" : "movie",
-              year: yearMatch ? Number(yearMatch[0]) : undefined,
-              description: description
-            };
-          } catch (_) {
-            return null;
-          }
-        })
-      );
+  /**
+   * 1. getHome
+   */
+  async function getHome(cb) {
+    try {
+      const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
+      const html = await request(base);
+      const items = parseCards(html);
 
       cb({
         success: true,
-        data: items.filter(Boolean)
+        data: {
+          "Latest Releases": items,
+        },
       });
-
-    } catch (error) {
-      sendError(cb, error, "SEARCH_FAILED");
+    } catch (err) {
+      cb({ success: false, message: err.message });
     }
   }
 
-
-  async function findPost(itemUrl) {
-  const value = String(itemUrl || "").trim();
-
-  // Handle SkyStream internal post IDs.
-  const internalMatch = value.match(/^rogmovies:post:(\d+)$/);
-
-  if (internalMatch) {
-    return await requestJson(
-      baseUrl() +
-      "/wp-json/wp/v2/posts/" +
-      internalMatch[1] +
-      "?_embed=1"
-    );
-  }
-
-  // Handle numeric WordPress post IDs.
-  if (/^\d+$/.test(value)) {
-    return await requestJson(
-      baseUrl() +
-      "/wp-json/wp/v2/posts/" +
-      value +
-      "?_embed=1"
-    );
-  }
-
-  let slug = value;
-
-  // Extract the slug from a permalink.
-  try {
-    const parsed = new URL(value);
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    slug = parts.length ? parts[parts.length - 1] : "";
-
-    const queryId = parsed.searchParams.get("p");
-
-    if (queryId && /^\d+$/.test(queryId)) {
-      return await requestJson(
-        baseUrl() +
-        "/wp-json/wp/v2/posts/" +
-        queryId +
-        "?_embed=1"
-      );
-    }
-  } catch (_) {
-    // Treat the supplied value as a slug.
-  }
-
-  slug = String(slug).replace(/\/+$/, "");
-
-  if (!slug) {
-    throw new Error("Could not identify the RogMovies post.");
-  }
-
-  // First request: resolve the exact slug to a post ID.
-  const summaries = await requestJson(
-    baseUrl() +
-    "/wp-json/wp/v2/posts/?slug=" +
-    encodeURIComponent(slug) +
-    "&per_page=1&_fields=id,slug,link,title"
-  );
-
-  if (
-    !Array.isArray(summaries) ||
-    !summaries.length ||
-    !summaries[0].id
-  ) {
-    throw new Error("Post not found in RogMovies API: " + slug);
-  }
-
-  // Second request: fetch the full post using its verified ID.
-  return await requestJson(
-    baseUrl() +
-    "/wp-json/wp/v2/posts/" +
-    summaries[0].id +
-    "?_embed=1"
-  );
-}
-  
-
-  function extractDownloadLinks(html) {
-    const source = String(html || "");
-    const anchorPattern = /<a\b([^>]*?)href\s*=\s*["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
-    const results = [];
-    let match;
-
-    while ((match = anchorPattern.exec(source)) !== null) {
-      let href = String(match[2] || "").replace(/&amp;/g, "&").trim();
-      const label = cleanText(match[4]);
-
-      if (!/^https?:\/\//i.test(href)) continue;
-
-      const before = source.slice(Math.max(0, match.index - 260), match.index);
-      const context = cleanText(before.slice(-220) + " " + label);
-      const combined = (context + " " + href).toLowerCase();
-
-      const looksLikeDownload =
-        /\b(download|g-direct|v-cloud|watch|play|480p|720p|1080p|2160p|4k|web-dl|episode|season)\b/i.test(combined) ||
-        /nexdrive|drive\.google|gofile|pixeldrain|mixdrop|streamtape|filemoon|voe\./i.test(href);
-
-      if (!looksLikeDownload) continue;
-      if (/youtube\.com|youtu\.be|imdb\.com|rogmovies\.im\/category\//i.test(href)) continue;
-
-      if (!results.some(function (entry) { return entry.url === href; })) {
-        results.push({
-          url: href,
-          label: label || context || "Open source " + (results.length + 1),
-          context: context
-        });
-      }
-    }
-
-    return results;
-  }
-
-  function parseSeasonEpisode(text, fallbackIndex) {
-    const seasonMatch = String(text || "").match(/\bS(?:eason\s*)?0*(\d{1,2})\b/i);
-    const episodeMatch = String(text || "").match(/\bE(?:pisode\s*)?0*(\d{1,3})\b/i);
-
-    return {
-      season: seasonMatch ? Number(seasonMatch[1]) : 1,
-      episode: episodeMatch ? Number(episodeMatch[1]) : fallbackIndex
-    };
-  }
-
-  async function load(url, cb) {
-  try {
-    const post = await findPost(url);
-    const item = toItem(post);
-    const html = post && post.content && post.content.rendered || "";
-    const links = extractDownloadLinks(html);
-
-    const episodes = links.map(function (link, index) {
-      const label = (link.context || "") + " " + (link.label || "");
-      const se = parseSeasonEpisode(label, index + 1);
-
-const quality = qualityFromUrl(
-  (link.context || "") + " " + (link.label || "")
-);      return {
-        name: "Watch " + quality,
-        url: link.url + "?skystream_quality=" + encodeURIComponent(quality),
-        quality: quality,
-        season: se.season,
-        episode: se.episode
-      };
-    });
-
-    const detail = Object.assign({}, item, {
-      url: String(post.link || item.url),
-      description: getDescription(post),
-      episodes: episodes
-    });
-
-    cb({ success: true, data: detail });
-
-  } catch (error) {
-    sendError(cb, error, "LOAD_FAILED");
-  }
-}
-
-  function isDirectMedia(url) {
-    return /\.(m3u8|mp4|m4v|webm|mpd)(?:$|[?#])/i.test(String(url || ""));
-  }
-
- function qualityFromUrl(value) {
-  const text = String(value || "").toLowerCase();
-
-  if (/\b2160p?\b|\b4k\b/.test(text)) return "2160p";
-  if (/\b1080p?\b/.test(text)) return "1080p";
-  if (/\b720p?\b/.test(text)) return "720p";
-  if (/\b480p?\b/.test(text)) return "480p";
-  if (/\b1440p?\b/.test(text)) return "1440p";
-
-  return "Auto";
-}
-
-  function extractEmbedUrls(html, pageUrl) {
-  const source = String(html || "");
-  const found = [];
-
-  const patterns = [
-    /<iframe\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi,
-    /<video\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi,
-    /<source\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi,
-    /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/gi
-  ];
-
-  const downloadHosts = [
-    "fastdl.beer",
-    "vcloud.beer",
-    "one.vegadrive.app",
-    "filebee.top"
-  ];
-
-  patterns.forEach(function (pattern, index) {
-    let match;
-
-    while ((match = pattern.exec(source)) !== null) {
-      let candidate = String(match[1] || "").replace(/&amp;/g, "&");
-
-      if (candidate.startsWith("//")) {
-        candidate = "https:" + candidate;
-      }
-
-      if (candidate.startsWith("/")) {
-        try {
-          candidate = new URL(candidate, pageUrl).toString();
-        } catch (_) {}
-      }
-
-      if (!/^https?:\/\//i.test(candidate)) continue;
-
-      // Only accept known download hosts from ordinary links.
-      if (index === 3) {
-        try {
-          const hostname = new URL(candidate).hostname;
-          if (downloadHosts.indexOf(hostname) < 0) continue;
-        } catch (_) {
-          continue;
-        }
-      }
-
-      if (found.indexOf(candidate) < 0) {
-        found.push(candidate);
-      }
-    }
-  });
-
-  return found;
-}
-
-function extractFastDlVideoUrl(html) {
-  const source = String(html || "");
-
-  // Find the intermediate download page.
-  const reurlMatch = source.match(
-    /var\s+reurl\s*=\s*["']([^"']+)["']/i
-  );
-
-  if (!reurlMatch) return "";
-
-  // Decode common HTML entities.
-  const downloadPage = reurlMatch[1]
-    .replace(/&amp;/g, "&")
-    .replace(/\\\//g, "/");
-
-  return downloadPage;
-}
-
-function extractGoogleVideoUrl(html) {
-  const source = String(html || "");
-
-  // Find the anchor with id="vd".
-  const anchorMatch = source.match(
-    /<a\b(?=[^>]*\bid\s*=\s*["']vd["'])[^>]*>/i
-  );
-
-  if (!anchorMatch) return "";
-
-  const hrefMatch = anchorMatch[0].match(
-    /\bhref\s*=\s*["']([^"']+)["']/i
-  );
-
-  if (!hrefMatch) return "";
-
-  const videoUrl = hrefMatch[1].replace(/&amp;/g, "&");
-
-  try {
-    const parsed = new URL(videoUrl);
-
-    if (
-      parsed.hostname !== "video-downloads.googleusercontent.com"
-    ) {
-      return "";
-    }
-
-    return videoUrl;
-  } catch (_) {
-    return "";
-  }
-}
-async function loadStreams(url, cb) {
-  try {
-const originalTarget = String(url || "").trim();
-
-const qualityMatch = originalTarget.match(
-  /[?&]skystream_quality=(2160p|1440p|1080p|720p|480p)/i
-);
-
-const detectedQuality = qualityMatch
-  ? qualityMatch[1].toLowerCase()
-  : "Auto";
-
-const target = originalTarget
-  .replace(/[?&]skystream_quality=(2160p|1440p|1080p|720p|480p)/i, "")
-  .replace(/[?&]$/, "");
-    if (!target) {
-      return cb({ success: true, data: [] });
-    }
-
-   
-
-    if (isDirectMedia(target)) {
-      return cb({
-        success: true,
-        data: [{
-          url: target,
-          source: "RogMovies",
-          quality: detectedQuality
-        }]
-      });
-    }
-
-    const html = await requestText(
-      target,
-      "text/html,application/json;q=0.9,*/*;q=0.8"
-    );
-
-    const embeds = extractEmbedUrls(html, target);
-    const streams = [];
-
-    for (let i = 0; i < embeds.length; i++) {
-      const embedUrl = embeds[i];
+  /**
+   * 2. search: Directly targets RogMovies' /ts-search.php backend
+   */
+  async function search(query, cb) {
+    try {
+      const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
+      const searchApiUrl = `${base}/ts-search.php?q=${encodeURIComponent(query)}&page=1`;
+
+      const rawResponse = await request(searchApiUrl);
+      const items = [];
 
       try {
-        if (new URL(embedUrl).hostname === "fastdl.beer") {
-          const fastDlHtml = await requestText(
-            embedUrl,
-            "text/html,*/*;q=0.8"
-          );
+        const json = JSON.parse(rawResponse);
+        if (json && json.hits && Array.isArray(json.hits)) {
+          for (const hit of json.hits) {
+            const doc = hit.document || hit;
+            if (doc && doc.permalink) {
+              const rawTitle = doc.post_title || "Unknown";
+              const title = decodeHtml(rawTitle).replace(/^Download\s+/i, "").trim();
 
-          const downloadPage = extractFastDlVideoUrl(fastDlHtml);
-          if (!downloadPage) continue;
-
-          const downloadHtml = await requestText(
-            downloadPage,
-            "text/html,*/*;q=0.8"
-          );
-
-          const videoUrl = extractGoogleVideoUrl(downloadHtml);
-
-          if (videoUrl) {
-            streams.push({
-              url: videoUrl,
-              source: "RogMovies FastDL",
-              quality: detectedQuality
-            });
+              items.push({
+                title: title,
+                url: doc.permalink,
+                posterUrl: doc.post_thumbnail || "",
+                type: /season\s*\d+/i.test(title) ? "series" : "movie",
+              });
+            }
           }
+        }
+      } catch (parseErr) {
+        items.push(...parseCards(rawResponse));
+      }
 
+      cb({
+        success: true,
+        data: items,
+      });
+    } catch (err) {
+      cb({ success: false, message: err.message });
+    }
+  }
+
+  /**
+   * 3. load: Parses single movie/series details & episode/download links
+   */
+  async function load(url, cb) {
+    try {
+      const html = await request(url);
+
+      const titleMatch =
+        html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
+        html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+      let title = titleMatch ? titleMatch[1].replace(/<[^>]*>?/gm, "").trim() : "Unknown";
+      title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
+
+      const contentMatch = html.match(/<div[^>]*class=["'][^"']*entry-content[^"']*["']([\s\S]*?)<\/div>/i);
+      const contentHtml = contentMatch ? contentMatch[1] : html;
+
+      let poster = "";
+      const posterMatches = contentHtml.match(/<img[^>]+src=["']([^"']+)["']/gi) || [];
+      for (const imgTag of posterMatches) {
+        const srcMatch = imgTag.match(/src=["']([^"']+)["']/i);
+        if (srcMatch && srcMatch[1]) {
+          const src = srcMatch[1];
+          if (!src.includes("logo") && !src.includes("icon") && !src.includes(".svg")) {
+            poster = src;
+            break;
+          }
+        }
+      }
+
+      let synopsis = "";
+      const plotMatch =
+        contentHtml.match(/(?:Synopsis|Plot|Storyline)[\s\S]*?<\/strong>\s*:?\s*([^<]+)/i) ||
+        contentHtml.match(/<p[^>]*>(?:Synopsis|Plot|Storyline)[\s\S]*?:?\s*([\s\S]*?)<\/p>/i);
+      if (plotMatch && plotMatch[1]) {
+        synopsis = decodeHtml(plotMatch[1].replace(/<[^>]*>?/gm, "").trim());
+      }
+
+      const isSeries = /season\s*\d+/i.test(title) || /episode/i.test(title) || /TV-Show/i.test(title);
+      const episodes = [];
+      const seenLinks = new Set();
+
+      const anchorRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+      let epCounter = 1;
+
+      while ((match = anchorRegex.exec(contentHtml)) !== null) {
+        const rawLink = match[1];
+        let linkText = match[2].replace(/<[^>]*>?/gm, "").trim();
+        linkText = decodeHtml(linkText);
+
+        const lowerLink = rawLink.toLowerCase();
+
+        if (
+          lowerLink.includes("rogmovies.im") ||
+          lowerLink.includes("vegamovies-apk") ||
+          lowerLink.includes("vglist") ||
+          lowerLink.includes("telegram") ||
+          lowerLink.includes("movies-by-quality") ||
+          lowerLink.includes("#comment") ||
+          seenLinks.has(rawLink)
+        ) {
           continue;
         }
 
-        if (isDirectMedia(embedUrl)) {
-          streams.push({
-            url: embedUrl,
-            source: "RogMovies Embed " + (i + 1),
-            quality: detectedQuality
+        if (
+          lowerLink.includes("nexdrive") ||
+          lowerLink.includes("hubcloud") ||
+          lowerLink.includes("gdflix") ||
+          lowerLink.includes("v-cloud") ||
+          lowerLink.includes("drive")
+        ) {
+          seenLinks.add(rawLink);
+          let cleanTitle = linkText.replace(/[⚡️⚡]/g, "").trim();
+
+          episodes.push({
+            title: cleanTitle || `Episode ${epCounter}`,
+            season: isSeries ? 1 : undefined,
+            episode: isSeries ? epCounter++ : undefined,
+            url: rawLink,
           });
         }
-      } catch (_) {}
+      }
+
+      cb({
+        success: true,
+        data: {
+          title: title,
+          synopsis: synopsis,
+          posterUrl: poster,
+          type: isSeries ? "series" : "movie",
+          episodes: episodes,
+        },
+      });
+    } catch (err) {
+      cb({ success: false, message: err.message });
     }
-
-    cb({ success: true, data: streams });
-
-  } catch (error) {
-    sendError(cb, error, "STREAMS_FAILED");
   }
-}
 
+  /**
+   * 4. loadStreams: Resolves NexDrive to FastDL embed players and direct video files
+   */
+  async function loadStreams(url, cb) {
+    try {
+      const streams = [];
+
+      if (/\.(m3u8|mp4)/i.test(url)) {
+        streams.push({
+          url: url,
+          quality: "Auto",
+          headers: { Referer: "https://rogmovies.im/" },
+        });
+        return cb({ success: true, data: streams });
+      }
+
+      let currentUrl = url;
+      let html = await request(currentUrl);
+
+      // Follow NexDrive to FastDL
+      if (currentUrl.includes("nexdrive")) {
+        const fastDlMatch =
+          html.match(/href=["'](https?:\/\/[^"']*fastdl\.[^"']+\/embed\.php\?download=[^"']+)["']/i) ||
+          html.match(/href=["'](https?:\/\/[^"']*(?:fastdl|vegadrive)\.[^"']+\/[^"']+)["']/i);
+
+        if (fastDlMatch && fastDlMatch[1]) {
+          currentUrl = fastDlMatch[1];
+          html = await request(currentUrl);
+        }
+      }
+
+      // Check HTML5 video tag
+      const sourceMatch =
+        html.match(/<source[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
+        html.match(/<video[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i);
+
+      if (sourceMatch && sourceMatch[1]) {
+        streams.push({
+          url: sourceMatch[1],
+          quality: "1080p",
+          headers: { Referer: currentUrl },
+        });
+      }
+
+      // Check JS file config
+      const jsFileMatch =
+        html.match(/(?:file|sources?|src)\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
+        html.match(/["'](https?:\/\/[^"']+\/stream\/[^"']+)["']/i);
+
+      if (jsFileMatch && jsFileMatch[1]) {
+        streams.push({
+          url: jsFileMatch[1],
+          quality: "Auto",
+          headers: { Referer: currentUrl },
+        });
+      }
+
+      // Embed fallback
+      if (streams.length === 0 && currentUrl.includes("fastdl")) {
+        streams.push({
+          url: currentUrl,
+          quality: "720p",
+          headers: { Referer: "https://nexdrive.beer/" },
+        });
+      }
+
+      cb({
+        success: true,
+        data: streams,
+      });
+    } catch (err) {
+      cb({ success: false, message: err.message });
+    }
+  }
+
+  // Register in global scope for SkyStream
   globalThis.getHome = getHome;
   globalThis.search = search;
   globalThis.load = load;

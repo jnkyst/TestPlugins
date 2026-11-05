@@ -2,15 +2,9 @@
   "packageName": "com.jnkyst.repo.rogmovies",
   "name": "Rogmovies",
   "version": 1,
-  "baseUrl": "https://rogmovies.im/",
-  "description": "Rogmovies plugin for TestPlugins",
-  "authors": [
-    "Jnkyst"
+  "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
+  "domains": [
+    "https://rogmovies.im"
   ],
-  "languages": [
-    "en"
-  ],
-  "categories": [
-    "Others"
-  ]
+  "author": "Jnkyst"
 }
