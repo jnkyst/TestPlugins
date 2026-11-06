@@ -458,17 +458,31 @@
         meta(html, 'og:image')
       );
 
-      var item = new MultimediaItem({
-        title: title,
-        url: url,
-        posterUrl: poster,
-        type: kind(title),
-        year: yearOf(title),
-        description:
-          meta(html, 'description') ||
-          meta(html, 'og:description')
-      });
+   var itemType = kind(title);
 
+var item = new MultimediaItem({
+  title: title,
+  url: url,
+  posterUrl: poster,
+  type: itemType,
+  year: yearOf(title),
+  description:
+    meta(html, 'description') ||
+    meta(html, 'og:description'),
+
+  // SkyStream uses an episode entry to enable
+  // the Play button, even for a movie.
+  episodes: itemType === 'movie'
+    ? [
+        new Episode({
+          name: 'Full Movie',
+          url: url,
+          season: 1,
+          episode: 1
+        })
+      ]
+    : []
+});
       callback({
         success: true,
         data: item
