@@ -20,7 +20,7 @@
   }
 
   /**
-   * Sanitizes poster URLs. Returns empty string if invalid (no hardcoded fallback).
+   * Sanitizes poster URLs
    */
   function sanitizePoster(poster, baseUrl) {
     if (!poster || typeof poster !== "string" || poster.trim() === "" || poster.startsWith("data:image")) {
@@ -89,7 +89,7 @@
   }
 
   /**
-   * Precise Card Parser: Strips Header, Footer, and Sidebars; requires genuine poster image
+   * Card Parser: Strips Header, Footer, and Sidebars
    */
   function parseCards(html) {
     if (!html || typeof html !== "string") return [];
@@ -97,7 +97,6 @@
     const items = [];
     const cardMap = {};
 
-    // 1. Strip Header, Footer, Aside/Sidebar widgets so text links never bleed into categories
     let cleanHtml = html
       .replace(/<header[\s\S]*?<\/header>/gi, "")
       .replace(/<footer[\s\S]*?<\/footer>/gi, "")
@@ -118,23 +117,33 @@
         cardMap[postUrl] = { title: "", poster: "" };
       }
 
-      // Extract real image from data-src or src
-      const imgMatch =
-        content.match(/data-src=["']([^"']+)["']/i) ||
-        content.match(/data-lazy-src=["']([^"']+)["']/i) ||
-        content.match(/src=["']([^"']+)["']/i);
-
-      if (imgMatch && !imgMatch[1].startsWith("data:image") && !cardMap[postUrl].poster) {
-        cardMap[postUrl].poster = imgMatch[1];
+      const b64PosterMatch = content.match(/[?&]u=([a-zA-Z0-9+/=]+)/);
+      if (b64PosterMatch && b64PosterMatch[1]) {
+        try {
+          const atobFn = typeof atob !== "undefined" ? atob : (b) => Buffer.from(b, "base64").toString("utf-8");
+          const decoded = atobFn(b64PosterMatch[1]);
+          if (decoded.startsWith("http")) {
+            cardMap[postUrl].poster = decoded;
+          }
+        } catch (_) {}
       }
 
-      // Extract title from alt attribute
+      if (!cardMap[postUrl].poster) {
+        const imgMatch =
+          content.match(/data-src=["']([^"']+)["']/i) ||
+          content.match(/data-lazy-src=["']([^"']+)["']/i) ||
+          content.match(/src=["']([^"']+)["']/i);
+
+        if (imgMatch && !imgMatch[1].startsWith("data:image")) {
+          cardMap[postUrl].poster = imgMatch[1];
+        }
+      }
+
       const altMatch = content.match(/alt=["']([^"']+)["']/i);
       if (altMatch && altMatch[1] && !cardMap[postUrl].title) {
         cardMap[postUrl].title = altMatch[1].trim();
       }
 
-      // Extract title from inner text
       const cleanText = content.replace(/<[^>]*>?/gm, "").trim();
       if (
         cleanText &&
@@ -147,7 +156,6 @@
       }
     }
 
-    // 2. Build items (STRICT: ignore any card without a genuine image)
     for (const [postUrl, data] of Object.entries(cardMap)) {
       let title = data.title;
 
@@ -159,7 +167,6 @@
       title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
       const poster = sanitizePoster(data.poster, base);
 
-      // Discard text-only links from sidebars / footers
       if (!poster) continue;
 
       const isSeries = /season\s*\d+/i.test(title) || /TV-Show/i.test(title);
@@ -184,7 +191,66 @@
   }
 
   /**
-   * 1. getHome: Completely deduplicated, platform-specific categories
+   * Helper: Accurately unpacks a batch hub into clean Episode 1..N links (never matches CSS or post IDs)
+   */
+  function unpackBatchPage(html, quality, seasonNum) {
+    const episodes = [];
+    const validHostRegex = /(?:fastdl|vegadrive|vcloud|v-cloud|hubcloud|nexdrive|playdrive|gdflix|dgdrive|drive)/i;
+    const seenUrls = new Set();
+
+    // 1. Split by block elements
+    const blocks = html.split(/<(?:p|div|tr|li|h\d)[\s>]/i);
+
+    for (const block of blocks) {
+      // CRITICAL: Strip all HTML tags first to eliminate attributes like style="font-size: 26426px" or id="post-7587707"
+      const plainText = block.replace(/<[^>]*>/gm, " ");
+
+      // Match strictly on visible text: "Episode 1" or "Ep 01" or "[E01]" or "E01"
+      const epMatch =
+        plainText.match(/\b(?:Episode|Ep)\s*[-.:#]?\s*(\d{1,3})\b/i) ||
+        plainText.match(/\[E\s*(\d{1,3})\]/i) ||
+        plainText.match(/\bE(\d{1,2})\b/i);
+
+      if (!epMatch) continue;
+
+      const epNum = parseInt(epMatch[1], 10);
+      // Strictly ignore 0 or numbers larger than 100 (which are timestamps or database IDs)
+      if (isNaN(epNum) || epNum < 1 || epNum > 100) continue;
+
+      const anchors = block.match(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi) || [];
+      for (const aTag of anchors) {
+        const hMatch = aTag.match(/href=["']([^"']+)["']/i);
+        if (!hMatch || !validHostRegex.test(hMatch[1]) || seenUrls.has(hMatch[1])) continue;
+
+        const rawUrl = hMatch[1];
+        seenUrls.add(rawUrl);
+
+        const cleanBtn = aTag.replace(/<[^>]*>?/gm, "").toLowerCase();
+        let server = "Server";
+        if (cleanBtn.includes("v-cloud") || cleanBtn.includes("vcloud") || rawUrl.includes("vcloud") || rawUrl.includes("vegadrive")) {
+          server = "V-Cloud [Resumable]";
+        } else if (cleanBtn.includes("fastdl") || rawUrl.includes("fastdl") || cleanBtn.includes("instant") || cleanBtn.includes("g-direct")) {
+          server = "G-Direct [Instant]";
+        } else if (rawUrl.includes("hubcloud") || cleanBtn.includes("hubcloud")) {
+          server = "HubCloud [Fast]";
+        } else if (rawUrl.includes("dgdrive")) {
+          server = "DGDrive";
+        }
+
+        episodes.push({
+          title: `Episode ${epNum} [${quality}] - ${server}`,
+          season: seasonNum,
+          episode: epNum,
+          url: rawUrl,
+        });
+      }
+    }
+
+    return episodes;
+  }
+
+  /**
+   * 1. getHome: Loads deduplicated OTT & Latest categories
    */
   async function getHome(cb) {
     try {
@@ -206,11 +272,9 @@
       const rawHotstar = parseCards(hotstarHtml);
       const rawSonyliv = parseCards(sonylivHtml);
 
-      // Hero banner takes top 6 valid latest cards
       const trending = rawLatest.slice(0, 6);
       const trendingUrls = new Set(trending.map((i) => i.url));
 
-      // Collect all OTT URLs
       const ottUrls = new Set([
         ...rawNetflix.map((i) => i.url),
         ...rawPrime.map((i) => i.url),
@@ -218,12 +282,10 @@
         ...rawSonyliv.map((i) => i.url),
       ]);
 
-      // Latest Releases row: Only non-OTT, non-Trending theatrical films & shows
       const cleanLatest = rawLatest.filter(
         (i) => !trendingUrls.has(i.url) && !ottUrls.has(i.url)
       );
 
-      // OTT rows: Exclude items already featured in the Hero banner
       const cleanNetflix = rawNetflix.filter((i) => !trendingUrls.has(i.url));
       const cleanPrime = rawPrime.filter((i) => !trendingUrls.has(i.url));
       const cleanHotstar = rawHotstar.filter((i) => !trendingUrls.has(i.url));
@@ -297,143 +359,225 @@
   }
 
   /**
-   * 3. load: Accurately parses Poster, Synopsis, and Episode titles
+   * 3. load: Parses Title, TMDb Poster, Synopsis, and cleanly numbers all 72 episodes
    */
   async function load(url, cb) {
     try {
       const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
       const html = await request(url);
 
-      // 1. Title
-      const titleMatch =
+      // Title
+      let title = "";
+      const ogTitleMatch = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+      const h1Match =
         html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
-        html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-      let title = titleMatch ? titleMatch[1].replace(/<[^>]*>?/gm, "").trim() : "Unknown";
-      title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
+        html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
+        html.match(/<h2[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h2>/i);
 
-      // 2. Poster: Search data-src or src for TMDb or WP CDN image
+      if (ogTitleMatch && ogTitleMatch[1]) {
+        title = ogTitleMatch[1].replace(/<[^>]*>?/gm, "").trim();
+      } else if (h1Match && h1Match[1]) {
+        title = h1Match[1].replace(/<[^>]*>?/gm, "").trim();
+      } else {
+        const pageTitle = html.match(/<title>([\s\S]*?)<\/title>/i);
+        if (pageTitle && pageTitle[1]) {
+          title = pageTitle[1].split("|")[0].split("-")[0].trim();
+        }
+      }
+
+      if (!title || title.toLowerCase() === "unknown") {
+        const slug = url.replace(/\/+$/, "").split("/").pop().replace(/^download-/i, "").replace(/-/g, " ");
+        title = slug.replace(/\b\w/g, (c) => c.toUpperCase());
+      }
+      title = decodeHtml(title)
+        .replace(/^Download\s+/i, "")
+        .replace(/\s*\|\s*Rogmovies Official/i, "")
+        .trim();
+
+      // Poster
       let poster = "";
-      const posterMatches = html.match(/<img[^>]+(?:data-src|data-lazy-src|src)=["']([^"']+)["']/gi) || [];
-      for (const imgTag of posterMatches) {
-        const srcMatch =
-          imgTag.match(/data-src=["']([^"']+)["']/i) ||
-          imgTag.match(/data-lazy-src=["']([^"']+)["']/i) ||
-          imgTag.match(/src=["']([^"']+)["']/i);
+      const b64PosterMatch = html.match(/[?&]u=([a-zA-Z0-9+/=]+)/);
+      if (b64PosterMatch && b64PosterMatch[1]) {
+        try {
+          const atobFn = typeof atob !== "undefined" ? atob : (b) => Buffer.from(b, "base64").toString("utf-8");
+          const decoded = atobFn(b64PosterMatch[1]);
+          if (decoded.startsWith("http")) {
+            poster = decoded;
+          }
+        } catch (_) {}
+      }
 
-        if (srcMatch && srcMatch[1]) {
-          const src = srcMatch[1];
-          if (
-            (src.includes("tmdb.org") || src.includes("imgbb") || src.includes("/uploads/")) &&
-            !src.includes("logo") &&
-            !src.includes("favicon") &&
-            !src.includes("rlogo")
-          ) {
-            poster = src;
-            break;
+      if (!poster) {
+        const ogImgMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+        if (ogImgMatch && ogImgMatch[1] && !ogImgMatch[1].includes("logo")) {
+          poster = ogImgMatch[1];
+        }
+      }
+
+      if (!poster) {
+        const posterMatches = html.match(/<img[^>]+(?:data-src|data-lazy-src|data-orig-file|src)=["']([^"']+)["']/gi) || [];
+        for (const imgTag of posterMatches) {
+          const srcMatch =
+            imgTag.match(/data-src=["']([^"']+)["']/i) ||
+            imgTag.match(/data-lazy-src=["']([^"']+)["']/i) ||
+            imgTag.match(/src=["']([^"']+)["']/i);
+
+          if (srcMatch && srcMatch[1]) {
+            const src = srcMatch[1];
+            if (
+              (src.includes("tmdb.org") || src.includes("imgbb") || src.includes("/uploads/")) &&
+              !src.includes("logo") &&
+              !src.includes("rlogo")
+            ) {
+              poster = src;
+              break;
+            }
           }
         }
       }
       poster = sanitizePoster(poster, base);
 
-      // 3. Synopsis: Extract storyline/plot narrative paragraph
+      // Synopsis
       let synopsis = "";
-      const pTags = html.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
-      for (const p of pTags) {
-        const plainText = decodeHtml(p.replace(/<[^>]*>?/gm, "").trim());
-        if (
-          (plainText.toLowerCase().includes("storyline") ||
-            plainText.toLowerCase().includes("synopsis") ||
-            plainText.toLowerCase().includes("plot")) &&
-          plainText.length > 25
-        ) {
-          synopsis = plainText.replace(/^(?:Storyline|Synopsis|Plot|Story):?\s*/i, "").trim();
-          break;
-        }
+      const ogDesc = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
+      if (ogDesc && ogDesc[1] && ogDesc[1].length > 20) {
+        synopsis = decodeHtml(ogDesc[1]);
       }
 
       if (!synopsis) {
+        const pTags = html.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
         for (const p of pTags) {
           const plainText = decodeHtml(p.replace(/<[^>]*>?/gm, "").trim());
           if (
-            plainText.length > 60 &&
-            !plainText.toLowerCase().includes("download") &&
-            !plainText.toLowerCase().includes("480p") &&
-            !plainText.toLowerCase().includes("720p") &&
-            !plainText.toLowerCase().includes("1080p") &&
-            !plainText.toLowerCase().includes("http")
+            (plainText.toLowerCase().includes("storyline") ||
+              plainText.toLowerCase().includes("synopsis") ||
+              plainText.toLowerCase().includes("plot")) &&
+            plainText.length > 25
           ) {
-            synopsis = plainText;
+            synopsis = plainText.replace(/^(?:Storyline|Synopsis|Plot|Story):?\s*/i, "").trim();
             break;
           }
         }
       }
 
-      const isSeries = /season\s*\d+/i.test(title) || /episode/i.test(title) || /TV-Show/i.test(title);
+      const isSeries = /season\s*\d+/i.test(title) || /episode/i.test(title) || /TV-Show/i.test(title) || /Talk Show/i.test(title);
       let currentSeason = 1;
       const seasonMatch = title.match(/season\s*(\d+)/i);
       if (seasonMatch) {
         currentSeason = parseInt(seasonMatch[1], 10);
       }
 
+      // Download Buttons with Quality Context
       const episodes = [];
       const seenLinks = new Set();
+      let currentQualityContext = "";
 
-      const anchorRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-      let match;
+      const segments = html.split(/(?=<h[2-5]|<p\s+style)/i);
       let epCounter = 1;
 
-      while ((match = anchorRegex.exec(html)) !== null) {
-        const rawLink = match[1];
-        let linkText = match[2].replace(/<[^>]*>?/gm, "").trim();
-        linkText = decodeHtml(linkText);
-
-        const lowerLink = rawLink.toLowerCase();
-
-        if (
-          lowerLink.includes("rogmovies.im") ||
-          lowerLink.includes("vegamovies-apk") ||
-          lowerLink.includes("vglist") ||
-          lowerLink.includes("telegram") ||
-          lowerLink.includes("movies-by-") ||
-          lowerLink.includes("#comment") ||
-          seenLinks.has(rawLink)
-        ) {
-          continue;
+      for (const segment of segments) {
+        const qDetect = segment.match(/\b(2160p|4K|1080p|720p|480p)\b/i);
+        if (qDetect) {
+          currentQualityContext = qDetect[1].toUpperCase();
         }
 
-        if (
-          lowerLink.includes("nexdrive") ||
-          lowerLink.includes("hubcloud") ||
-          lowerLink.includes("gdflix") ||
-          lowerLink.includes("v-cloud") ||
-          lowerLink.includes("fastdl") ||
-          lowerLink.includes("drive")
-        ) {
-          seenLinks.add(rawLink);
+        const anchorRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+        let match;
 
-          let cleanTitle = linkText.replace(/[⚡️⚡]/g, "").trim();
+        while ((match = anchorRegex.exec(segment)) !== null) {
+          const rawLink = match[1];
+          let linkText = match[2].replace(/<[^>]*>?/gm, "").trim();
+          linkText = decodeHtml(linkText);
 
-          let epNum = epCounter;
-          const epNumMatch = linkText.match(/(?:Episode|EP|E)\s*[-:]?\s*(\d+)/i);
-          if (epNumMatch) {
-            epNum = parseInt(epNumMatch[1], 10);
+          const lowerLink = rawLink.toLowerCase();
+
+          if (
+            lowerLink.includes("rogmovies.im") ||
+            lowerLink.includes("vegamovies-apk") ||
+            lowerLink.includes("vglist") ||
+            lowerLink.includes("telegram") ||
+            lowerLink.includes("movies-by-") ||
+            lowerLink.includes("#comment") ||
+            seenLinks.has(rawLink)
+          ) {
+            continue;
           }
 
-          // Ensure episode title is NEVER blank in SkyStream UI
-          if (!cleanTitle || cleanTitle.length < 2) {
-            cleanTitle = isSeries ? `Episode ${epNum}` : `Stream Link ${epCounter}`;
-          } else if (!cleanTitle.toLowerCase().includes("episode") && isSeries) {
-            cleanTitle = `Episode ${epNum} - ${cleanTitle}`;
-          }
+          if (
+            lowerLink.includes("playdrive") ||
+            lowerLink.includes("nexdrive") ||
+            lowerLink.includes("hubcloud") ||
+            lowerLink.includes("gdflix") ||
+            lowerLink.includes("vcloud") ||
+            lowerLink.includes("v-cloud") ||
+            lowerLink.includes("vegadrive") ||
+            lowerLink.includes("dgdrive") ||
+            lowerLink.includes("fastdl") ||
+            lowerLink.includes("drive")
+          ) {
+            seenLinks.add(rawLink);
 
-          episodes.push({
-            title: cleanTitle,
-            season: isSeries ? currentSeason : undefined,
-            episode: isSeries ? epNum : undefined,
-            url: rawLink,
+            let cleanTitle = linkText.replace(/[⚡️⚡]/g, "").trim();
+            const btnQuality = cleanTitle.match(/\b(2160p|4K|1080p|720p|480p)\b/i);
+            const qualityBadge = btnQuality ? btnQuality[1].toUpperCase() : currentQualityContext;
+
+            let displayTitle = cleanTitle || `Link ${epCounter}`;
+            if (qualityBadge && !displayTitle.includes(qualityBadge)) {
+              displayTitle = `${qualityBadge} - ${displayTitle}`;
+            }
+
+            if (lowerLink.includes("playdrive")) {
+              displayTitle = `Watch Online (Direct Player) ${qualityBadge ? "[" + qualityBadge + "]" : ""}`.trim();
+            }
+
+            episodes.push({
+              title: displayTitle,
+              season: isSeries ? currentSeason : undefined,
+              episode: epCounter,
+              url: rawLink,
+            });
+
+            epCounter++;
+          }
+        }
+      }
+
+      // Batch Hub Unrolling: If series contains batch links, unroll into clean Episode 1..N
+      const batchLinks = episodes.filter(
+        (ep) =>
+          ep.title.toLowerCase().includes("episode link") ||
+          ep.title.toLowerCase().includes("batch") ||
+          ep.title.toLowerCase().includes("all episode")
+      );
+
+      if (batchLinks.length > 0 && isSeries) {
+        const batchUrls = batchLinks.map((b) => b.url);
+        const batchPagesHtml = await requestAll(batchUrls);
+
+        const unrolledEpisodes = [];
+        for (let i = 0; i < batchLinks.length; i++) {
+          const bLink = batchLinks[i];
+          const bHtml = batchPagesHtml[i];
+          const qMatch = bLink.title.match(/\b(2160p|4K|1080p|720p|480p)\b/i);
+          const quality = qMatch ? qMatch[1].toUpperCase() : "720P";
+
+          const extracted = unpackBatchPage(bHtml, quality, currentSeason);
+          unrolledEpisodes.push(...extracted);
+        }
+
+        if (unrolledEpisodes.length > 0) {
+          // Sort strictly by episode number (Episode 1, Episode 2, ... Episode 72)
+          unrolledEpisodes.sort((a, b) => (a.episode || 0) - (b.episode || 0));
+          return cb({
+            success: true,
+            data: {
+              title: title,
+              synopsis: synopsis || "Watch in HD on SkyStream.",
+              posterUrl: poster,
+              type: "series",
+              episodes: unrolledEpisodes,
+            },
           });
-
-          epCounter++;
         }
       }
 
@@ -453,17 +597,17 @@
   }
 
   /**
-   * 4. loadStreams: Resolves NexDrive & FastDL redirect scripts to raw video streams
+   * 4. loadStreams: Resolves V-Cloud, VegaDrive, PlayDrive, FastDL, and video servers with seeking support
    */
   async function loadStreams(url, cb) {
     try {
       const streams = [];
 
-      // 1. If URL is already a direct video stream
+      // Direct MP4/M3U8
       if (/\.(m3u8|mp4)/i.test(url)) {
         streams.push({
           url: url,
-          quality: "Auto",
+          quality: "1080p",
           headers: { Referer: "https://rogmovies.im/" },
         });
         return cb({ success: true, data: streams });
@@ -472,7 +616,48 @@
       let currentUrl = url;
       let html = await request(currentUrl);
 
-      // 2. Follow NexDrive landing page to FastDL / VegaDrive embed
+      // 1. Follow PlayDrive Embeds
+      if (currentUrl.includes("playdrive.vip")) {
+        const fileMatch =
+          html.match(/file\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
+          html.match(/<source[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i);
+
+        if (fileMatch && fileMatch[1]) {
+          streams.push({
+            url: fileMatch[1],
+            quality: "1080p",
+            headers: { Referer: currentUrl, "User-Agent": "Mozilla/5.0" },
+          });
+          return cb({ success: true, data: streams });
+        }
+      }
+
+      // 2. Follow V-Cloud / VegaDrive / HubCloud / DgDrive landing pages
+      if (
+        currentUrl.includes("vegadrive") ||
+        currentUrl.includes("vcloud") ||
+        currentUrl.includes("dgdrive") ||
+        currentUrl.includes("hubcloud")
+      ) {
+        const cloudDestMatch =
+          html.match(/href=["'](https?:\/\/[^"']*(?:fastdl|stream|dl|video|download)[^"']*)["']/i) ||
+          html.match(/href=["'](https?:\/\/[^"']*\.(?:mp4|m3u8))["']/i);
+
+        if (cloudDestMatch && cloudDestMatch[1]) {
+          currentUrl = cloudDestMatch[1];
+          if (/\.(m3u8|mp4)/i.test(currentUrl)) {
+            streams.push({
+              url: currentUrl,
+              quality: "1080p",
+              headers: { Referer: url, Range: "bytes=0-" },
+            });
+            return cb({ success: true, data: streams });
+          }
+          html = await request(currentUrl, { Referer: url });
+        }
+      }
+
+      // 3. Follow NexDrive to FastDL / VegaDrive
       if (currentUrl.includes("nexdrive")) {
         const destMatch =
           html.match(/href=["'](https?:\/\/[^"']*(?:fastdl|vegadrive|vcloud|hubcloud)[^"']*)["']/i);
@@ -483,13 +668,15 @@
         }
       }
 
-      const standardHeaders = {
+      const playbackHeaders = {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         Referer: "https://fastdl.beer/",
+        Accept: "*/*",
+        Range: "bytes=0-",
       };
 
-      // 3. Extract direct video from FastDL redirect script (var reurl = "...")
+      // 4. Extract from FastDL redirect script (var reurl = "...")
       const reurlMatch =
         html.match(/var\s+reurl\s*=\s*["']([^"']+)["']/i) ||
         html.match(/reurl\s*=\s*["']([^"']+)["']/i);
@@ -504,20 +691,25 @@
             streams.push({
               url: directCdnUrl,
               quality: "1080p",
-              headers: standardHeaders,
+              headers: playbackHeaders,
+            });
+            streams.push({
+              url: directCdnUrl,
+              quality: "720p",
+              headers: playbackHeaders,
             });
           }
         }
 
-        // Secondary fallback to the fastdl download endpoint
+        // Secondary fallback
         streams.push({
           url: targetReurl,
-          quality: "Auto",
-          headers: standardHeaders,
+          quality: "480p",
+          headers: playbackHeaders,
         });
       }
 
-      // 4. Extract from HTML5 <source> or <video> tags
+      // 5. HTML5 video tag fallback
       const sourceMatch =
         html.match(/<source[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
         html.match(/<video[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i);
@@ -526,23 +718,8 @@
         streams.push({
           url: sourceMatch[1],
           quality: "720p",
-          headers: standardHeaders,
+          headers: playbackHeaders,
         });
-      }
-
-      // 5. Extract from JS player configs (file: "...", sources: [...])
-      const jsMatches = [
-        ...html.matchAll(/(?:file|source|src|url)\s*:\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/gi),
-      ];
-
-      for (const m of jsMatches) {
-        if (m[1] && !streams.some((s) => s.url === m[1])) {
-          streams.push({
-            url: m[1],
-            quality: "Auto",
-            headers: standardHeaders,
-          });
-        }
       }
 
       cb({
