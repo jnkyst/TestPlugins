@@ -6,5 +6,17 @@
   "domains": [
     "https://rogmovies.im"
   ],
-  "author": "Jnkyst"
+  "author": "Jnkyst",
+  "baseUrl": "https://rogmovies.im",
+  "authors": [
+    "Deepak"
+  ],
+  "languages": [
+    "hi",
+    "en"
+  ],
+  "categories": [
+    "Movies",
+    "Series"
+  ]
 }

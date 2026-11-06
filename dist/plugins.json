@@ -206,6 +206,18 @@
       "https://rogmovies.im"
     ],
     "author": "Jnkyst",
+    "baseUrl": "https://rogmovies.im",
+    "authors": [
+      "Deepak"
+    ],
+    "languages": [
+      "hi",
+      "en"
+    ],
+    "categories": [
+      "Movies",
+      "Series"
+    ],
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.rogmovies.sky"
   },
   {
