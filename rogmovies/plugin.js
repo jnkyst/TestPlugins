@@ -1,6 +1,4 @@
 (function () {
-  const DEFAULT_POSTER = "https://image.tmdb.org/t/p/w500/jbmZPjSfCdIHo269QZK203WZSm.jpg";
-
   /**
    * Helper: Decodes HTML and Hex entities
    */
@@ -22,11 +20,11 @@
   }
 
   /**
-   * Sanitizes poster URLs
+   * Sanitizes poster URLs. Returns empty string if invalid (no hardcoded fallback).
    */
   function sanitizePoster(poster, baseUrl) {
     if (!poster || typeof poster !== "string" || poster.trim() === "" || poster.startsWith("data:image")) {
-      return DEFAULT_POSTER;
+      return "";
     }
     poster = poster.trim();
     if (poster.startsWith("//")) return "https:" + poster;
@@ -91,7 +89,7 @@
   }
 
   /**
-   * Precise Card Parser
+   * Precise Card Parser: Strips Header, Footer, and Sidebars; requires genuine poster image
    */
   function parseCards(html) {
     if (!html || typeof html !== "string") return [];
@@ -99,11 +97,11 @@
     const items = [];
     const cardMap = {};
 
-    let cleanHtml = html.replace(/<header[\s\S]*?<\/header>/gi, "");
-    const headerEndIdx = cleanHtml.toLowerCase().indexOf("</header>");
-    if (headerEndIdx !== -1) {
-      cleanHtml = cleanHtml.slice(headerEndIdx + 9);
-    }
+    // 1. Strip Header, Footer, Aside/Sidebar widgets so text links never bleed into categories
+    let cleanHtml = html
+      .replace(/<header[\s\S]*?<\/header>/gi, "")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+      .replace(/<aside[\s\S]*?<\/aside>/gi, "");
 
     const anchorRegex = /<a\s+[^>]*href=["'](https?:\/\/[^"']*\/download-[^"']+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
     let match;
@@ -120,6 +118,7 @@
         cardMap[postUrl] = { title: "", poster: "" };
       }
 
+      // Extract real image from data-src or src
       const imgMatch =
         content.match(/data-src=["']([^"']+)["']/i) ||
         content.match(/data-lazy-src=["']([^"']+)["']/i) ||
@@ -129,11 +128,13 @@
         cardMap[postUrl].poster = imgMatch[1];
       }
 
+      // Extract title from alt attribute
       const altMatch = content.match(/alt=["']([^"']+)["']/i);
       if (altMatch && altMatch[1] && !cardMap[postUrl].title) {
         cardMap[postUrl].title = altMatch[1].trim();
       }
 
+      // Extract title from inner text
       const cleanText = content.replace(/<[^>]*>?/gm, "").trim();
       if (
         cleanText &&
@@ -146,6 +147,7 @@
       }
     }
 
+    // 2. Build items (STRICT: ignore any card without a genuine image)
     for (const [postUrl, data] of Object.entries(cardMap)) {
       let title = data.title;
 
@@ -157,6 +159,7 @@
       title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
       const poster = sanitizePoster(data.poster, base);
 
+      // Discard text-only links from sidebars / footers
       if (!poster) continue;
 
       const isSeries = /season\s*\d+/i.test(title) || /TV-Show/i.test(title);
@@ -181,7 +184,7 @@
   }
 
   /**
-   * 1. getHome: Completely deduplicated categories
+   * 1. getHome: Completely deduplicated, platform-specific categories
    */
   async function getHome(cb) {
     try {
@@ -203,9 +206,11 @@
       const rawHotstar = parseCards(hotstarHtml);
       const rawSonyliv = parseCards(sonylivHtml);
 
+      // Hero banner takes top 6 valid latest cards
       const trending = rawLatest.slice(0, 6);
       const trendingUrls = new Set(trending.map((i) => i.url));
 
+      // Collect all OTT URLs
       const ottUrls = new Set([
         ...rawNetflix.map((i) => i.url),
         ...rawPrime.map((i) => i.url),
@@ -213,10 +218,12 @@
         ...rawSonyliv.map((i) => i.url),
       ]);
 
+      // Latest Releases row: Only non-OTT, non-Trending theatrical films & shows
       const cleanLatest = rawLatest.filter(
         (i) => !trendingUrls.has(i.url) && !ottUrls.has(i.url)
       );
 
+      // OTT rows: Exclude items already featured in the Hero banner
       const cleanNetflix = rawNetflix.filter((i) => !trendingUrls.has(i.url));
       const cleanPrime = rawPrime.filter((i) => !trendingUrls.has(i.url));
       const cleanHotstar = rawHotstar.filter((i) => !trendingUrls.has(i.url));
@@ -290,57 +297,77 @@
   }
 
   /**
-   * 3. load: Parses single movie/series details & episode/download links
+   * 3. load: Accurately parses Poster, Synopsis, and Episode titles
    */
   async function load(url, cb) {
     try {
       const base = (typeof manifest !== "undefined" && manifest.baseUrl) || "https://rogmovies.im";
       const html = await request(url);
 
-      // Title
+      // 1. Title
       const titleMatch =
         html.match(/<h1[^>]*class=["'][^"']*entry-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i) ||
         html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
       let title = titleMatch ? titleMatch[1].replace(/<[^>]*>?/gm, "").trim() : "Unknown";
       title = decodeHtml(title).replace(/^Download\s+/i, "").trim();
 
-      // Poster: Look for TMDb, imgbb, or WP post image
+      // 2. Poster: Search data-src or src for TMDb or WP CDN image
       let poster = "";
-      const posterMatches = html.match(/<img[^>]+src=["']([^"']+)["']/gi) || [];
+      const posterMatches = html.match(/<img[^>]+(?:data-src|data-lazy-src|src)=["']([^"']+)["']/gi) || [];
       for (const imgTag of posterMatches) {
-        const srcMatch = imgTag.match(/src=["']([^"']+)["']/i);
+        const srcMatch =
+          imgTag.match(/data-src=["']([^"']+)["']/i) ||
+          imgTag.match(/data-lazy-src=["']([^"']+)["']/i) ||
+          imgTag.match(/src=["']([^"']+)["']/i);
+
         if (srcMatch && srcMatch[1]) {
           const src = srcMatch[1];
           if (
-            src.includes("tmdb.org") ||
-            src.includes("imgbb") ||
-            src.includes("/wp-content/uploads/") ||
-            src.includes("image")
+            (src.includes("tmdb.org") || src.includes("imgbb") || src.includes("/uploads/")) &&
+            !src.includes("logo") &&
+            !src.includes("favicon") &&
+            !src.includes("rlogo")
           ) {
-            if (!src.includes("logo") && !src.includes("favicon") && !src.includes(".svg")) {
-              poster = src;
-              break;
-            }
+            poster = src;
+            break;
           }
         }
       }
       poster = sanitizePoster(poster, base);
 
-      // Synopsis: Look for Synopsis / Storyline / Plot block
+      // 3. Synopsis: Extract storyline/plot narrative paragraph
       let synopsis = "";
-      const plotMatch =
-        html.match(/(?:Synopsis|Plot|Storyline)[\s\S]*?<\/strong>\s*:?\s*([^<]+)/i) ||
-        html.match(/<p[^>]*>(?:Synopsis|Plot|Storyline)[\s\S]*?:?\s*([\s\S]*?)<\/p>/i) ||
-        html.match(/<div[^>]*class=["'][^"']*entry-content[^"']*["'][\s\S]*?<p>([\s\S]*?)<\/p>/i);
-
-      if (plotMatch && plotMatch[1]) {
-        const cleanPlot = plotMatch[1].replace(/<[^>]*>?/gm, "").trim();
-        if (cleanPlot.length > 20 && !cleanPlot.includes("G-Direct")) {
-          synopsis = decodeHtml(cleanPlot);
+      const pTags = html.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
+      for (const p of pTags) {
+        const plainText = decodeHtml(p.replace(/<[^>]*>?/gm, "").trim());
+        if (
+          (plainText.toLowerCase().includes("storyline") ||
+            plainText.toLowerCase().includes("synopsis") ||
+            plainText.toLowerCase().includes("plot")) &&
+          plainText.length > 25
+        ) {
+          synopsis = plainText.replace(/^(?:Storyline|Synopsis|Plot|Story):?\s*/i, "").trim();
+          break;
         }
       }
 
-      // Check if Series or Movie
+      if (!synopsis) {
+        for (const p of pTags) {
+          const plainText = decodeHtml(p.replace(/<[^>]*>?/gm, "").trim());
+          if (
+            plainText.length > 60 &&
+            !plainText.toLowerCase().includes("download") &&
+            !plainText.toLowerCase().includes("480p") &&
+            !plainText.toLowerCase().includes("720p") &&
+            !plainText.toLowerCase().includes("1080p") &&
+            !plainText.toLowerCase().includes("http")
+          ) {
+            synopsis = plainText;
+            break;
+          }
+        }
+      }
+
       const isSeries = /season\s*\d+/i.test(title) || /episode/i.test(title) || /TV-Show/i.test(title);
       let currentSeason = 1;
       const seasonMatch = title.match(/season\s*(\d+)/i);
@@ -351,7 +378,6 @@
       const episodes = [];
       const seenLinks = new Set();
 
-      // Extract all download anchors
       const anchorRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
       let match;
       let epCounter = 1;
@@ -363,7 +389,6 @@
 
         const lowerLink = rawLink.toLowerCase();
 
-        // Skip ads, navigation, and comments
         if (
           lowerLink.includes("rogmovies.im") ||
           lowerLink.includes("vegamovies-apk") ||
@@ -376,29 +401,27 @@
           continue;
         }
 
-        // Accept links pointing to cloud file hosts
         if (
           lowerLink.includes("nexdrive") ||
           lowerLink.includes("hubcloud") ||
           lowerLink.includes("gdflix") ||
           lowerLink.includes("v-cloud") ||
+          lowerLink.includes("fastdl") ||
           lowerLink.includes("drive")
         ) {
           seenLinks.add(rawLink);
 
-          // Clean up link title
           let cleanTitle = linkText.replace(/[⚡️⚡]/g, "").trim();
 
-          // Episode number extraction
           let epNum = epCounter;
           const epNumMatch = linkText.match(/(?:Episode|EP|E)\s*[-:]?\s*(\d+)/i);
           if (epNumMatch) {
             epNum = parseInt(epNumMatch[1], 10);
           }
 
-          // If button title is generic (e.g. "G-Direct [Instant]"), make it descriptive
+          // Ensure episode title is NEVER blank in SkyStream UI
           if (!cleanTitle || cleanTitle.length < 2) {
-            cleanTitle = isSeries ? `Episode ${epNum}` : `Play Stream ${epCounter}`;
+            cleanTitle = isSeries ? `Episode ${epNum}` : `Stream Link ${epCounter}`;
           } else if (!cleanTitle.toLowerCase().includes("episode") && isSeries) {
             cleanTitle = `Episode ${epNum} - ${cleanTitle}`;
           }
@@ -430,13 +453,13 @@
   }
 
   /**
-   * 4. loadStreams: Resolves NexDrive & FastDL embed players into raw video streams
+   * 4. loadStreams: Resolves NexDrive & FastDL redirect scripts to raw video streams
    */
   async function loadStreams(url, cb) {
     try {
       const streams = [];
 
-      // 1. If URL is already direct video
+      // 1. If URL is already a direct video stream
       if (/\.(m3u8|mp4)/i.test(url)) {
         streams.push({
           url: url,
@@ -451,75 +474,73 @@
 
       // 2. Follow NexDrive landing page to FastDL / VegaDrive embed
       if (currentUrl.includes("nexdrive")) {
-        const fastDlMatch =
-          html.match(/href=["'](https?:\/\/[^"']*fastdl\.[^"']+\/embed\.php\?download=[^"']+)["']/i) ||
-          html.match(/href=["'](https?:\/\/[^"']*(?:fastdl|vegadrive)\.[^"']+\/[^"']+)["']/i);
+        const destMatch =
+          html.match(/href=["'](https?:\/\/[^"']*(?:fastdl|vegadrive|vcloud|hubcloud)[^"']*)["']/i);
 
-        if (fastDlMatch && fastDlMatch[1]) {
-          currentUrl = fastDlMatch[1];
+        if (destMatch && destMatch[1]) {
+          currentUrl = destMatch[1];
           html = await request(currentUrl, { Referer: url });
         }
       }
 
-      // 3. Extract DIRECT video streams from the player page (FastDL / VegaDrive)
-      const refererHeader = { Referer: currentUrl };
+      const standardHeaders = {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Referer: "https://fastdl.beer/",
+      };
 
-      // Check for raw .mp4 or .m3u8 inside <source> or <video>
-      const directVideoMatch =
-        html.match(/<source[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
-        html.match(/<video[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i);
+      // 3. Extract direct video from FastDL redirect script (var reurl = "...")
+      const reurlMatch =
+        html.match(/var\s+reurl\s*=\s*["']([^"']+)["']/i) ||
+        html.match(/reurl\s*=\s*["']([^"']+)["']/i);
 
-      if (directVideoMatch && directVideoMatch[1]) {
+      if (reurlMatch && reurlMatch[1]) {
+        const targetReurl = reurlMatch[1];
+
+        // Direct Stream Parameter (Google UserContent CDN)
+        if (targetReurl.includes("link=")) {
+          const directCdnUrl = decodeURIComponent(targetReurl.split("link=")[1]);
+          if (directCdnUrl.startsWith("http")) {
+            streams.push({
+              url: directCdnUrl,
+              quality: "1080p",
+              headers: standardHeaders,
+            });
+          }
+        }
+
+        // Secondary fallback to the fastdl download endpoint
         streams.push({
-          url: directVideoMatch[1],
-          quality: "1080p",
-          headers: refererHeader,
+          url: targetReurl,
+          quality: "Auto",
+          headers: standardHeaders,
         });
       }
 
-      // Check for video URL inside JS players: file: "...", url: "...", sources: [{file:...}]
-      const jsStreamMatches = [
+      // 4. Extract from HTML5 <source> or <video> tags
+      const sourceMatch =
+        html.match(/<source[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i) ||
+        html.match(/<video[^>]+src=["']([^"']+\.(?:mp4|m3u8)[^"']*)["']/i);
+
+      if (sourceMatch && sourceMatch[1] && !streams.some((s) => s.url === sourceMatch[1])) {
+        streams.push({
+          url: sourceMatch[1],
+          quality: "720p",
+          headers: standardHeaders,
+        });
+      }
+
+      // 5. Extract from JS player configs (file: "...", sources: [...])
+      const jsMatches = [
         ...html.matchAll(/(?:file|source|src|url)\s*:\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/gi),
       ];
 
-      for (const m of jsStreamMatches) {
+      for (const m of jsMatches) {
         if (m[1] && !streams.some((s) => s.url === m[1])) {
           streams.push({
             url: m[1],
             quality: "Auto",
-            headers: refererHeader,
-          });
-        }
-      }
-
-      // Check for FastDL direct stream endpoint (/stream.php or /dl/ or /get/)
-      const streamEndpoint =
-        html.match(/href=["'](https?:\/\/[^"']*\/(?:stream|dl|video|get)\.php\?[^"']+)["']/i) ||
-        html.match(/["'](https?:\/\/[^"']*\/(?:stream|dl|video|get)\.php\?[^"']+)["']/i);
-
-      if (streamEndpoint && streamEndpoint[1] && !streams.some((s) => s.url === streamEndpoint[1])) {
-        streams.push({
-          url: streamEndpoint[1],
-          quality: "720p",
-          headers: refererHeader,
-        });
-      }
-
-      // 4. Fallback if FastDL uses token redirect
-      if (streams.length === 0 && currentUrl.includes("fastdl")) {
-        // Many FastDL pages have a download button linking to the file:
-        const dlBtn = html.match(/<a[^>]+href=["']([^"']+\/download\.php\?[^"']+)["']/i);
-        if (dlBtn && dlBtn[1]) {
-          streams.push({
-            url: dlBtn[1],
-            quality: "720p",
-            headers: refererHeader,
-          });
-        } else {
-          streams.push({
-            url: currentUrl,
-            quality: "Auto",
-            headers: refererHeader,
+            headers: standardHeaders,
           });
         }
       }
