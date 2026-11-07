@@ -1,23 +1,13 @@
-/*
- * SkyStream RogMovies plugin
- *
- * Set this in plugin.json:
- *
- * "baseUrl": "https://rogmovies.im"
- *
- * Use only content you are authorized to access.
- */
-
 (function () {
   'use strict';
 
-  // ====================================
+  // =====================================
   // GENERAL HELPERS
-  // ====================================
+  // =====================================
 
   function base() {
     return String(
-      manifest.baseUrl || 'https://rogmovies.im'
+      manifest.baseUrl || 'https://rogmovies.asia'
     ).replace(/\/+$/, '');
   }
 
@@ -60,15 +50,22 @@
       : '';
   }
 
+  function normalizeRogUrl(url) {
+    return String(url || '').replace(
+      /^https?:\/\/(?:www\.)?rogmovies\.(?:im|asia)(?=\/|$)/i,
+      base()
+    );
+  }
+
   function absolute(url) {
     url = decode(url || '').trim();
 
     if (/^https?:\/\//i.test(url)) {
-      return url;
+      return normalizeRogUrl(url);
     }
 
     if (url.indexOf('//') === 0) {
-      return 'https:' + url;
+      return normalizeRogUrl('https:' + url);
     }
 
     if (url.charAt(0) === '/') {
@@ -82,44 +79,44 @@
     return url.indexOf(base() + '/') === 0;
   }
 
- async function get(url) {
-  var response = await http_get(url, {
-    'User-Agent': 'Mozilla/5.0',
-    'Accept': 'text/html,application/xhtml+xml'
-  });
+  async function get(url) {
+    var response = await http_get(url, {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'text/html,application/xhtml+xml'
+    });
 
-  if (
-    !response ||
-    (
-      response.status &&
-      (response.status < 200 || response.status >= 400)
-    )
-  ) {
-    var body = String(
-      response && response.body ? response.body : ''
-    );
+    if (
+      !response ||
+      (
+        response.status &&
+        (response.status < 200 || response.status >= 400)
+      )
+    ) {
+      var body = String(
+        response && response.body
+          ? response.body
+          : ''
+      );
 
-    // Print recognizable network-error codes only.
-    // Don't print page contents, cookies, or tokenized URLs.
-    var networkError = body.match(
-      /\b(ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|CERT_[A-Z_]+|UNABLE_TO_[A-Z_]+|DEPTH_ZERO_SELF_SIGNED_CERT)\b/i
-    );
+      var networkError = body.match(
+        /\b(ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|CERT_[A-Z_]+|UNABLE_TO_[A-Z_]+|DEPTH_ZERO_SELF_SIGNED_CERT)\b/i
+      );
 
-    console.error(
-      'HTTP diagnostic: status=' +
-      (response && response.status) +
-      ', networkError=' +
-      (networkError ? networkError[1] : 'not identified')
-    );
+      console.error(
+        'HTTP diagnostic: status=' +
+        (response && response.status) +
+        ', networkError=' +
+        (networkError ? networkError[1] : 'not identified')
+      );
 
-    throw new Error(
-      'HTTP request failed: ' +
-      (response && response.status)
-    );
+      throw new Error(
+        'HTTP request failed: ' +
+        (response && response.status)
+      );
+    }
+
+    return String(response.body || '');
   }
-
-  return String(response.body || '');
-}
 
   function cleanTitle(value) {
     return text(value)
@@ -156,9 +153,9 @@
     });
   }
 
-  // ====================================
-  // LISTING HELPERS
-  // ====================================
+  // =====================================
+  // HOME LISTINGS
+  // =====================================
 
   function listings(html) {
     var items = [];
@@ -234,9 +231,9 @@
     return '';
   }
 
-  // ====================================
+  // =====================================
   // HOME
-  // ====================================
+  // =====================================
 
   async function getHome(callback) {
     var sections = [
@@ -321,9 +318,9 @@
     }
   }
 
-  // ====================================
+  // =====================================
   // SEARCH
-  // ====================================
+  // =====================================
 
   async function search(query, page, callback) {
     if (typeof page === 'function') {
@@ -417,11 +414,13 @@
     }
   }
 
-  // ====================================
-  // TITLE DETAILS
-  // ====================================
+  // =====================================
+  // MOVIE / SERIES DETAILS
+  // =====================================
 
   async function load(url, callback) {
+    url = normalizeRogUrl(url);
+
     try {
       if (!isSourcePage(url)) {
         throw new Error(
@@ -458,31 +457,37 @@
         meta(html, 'og:image')
       );
 
-   var itemType = kind(title);
+      var itemType = kind(title);
 
-var item = new MultimediaItem({
-  title: title,
-  url: url,
-  posterUrl: poster,
-  type: itemType,
-  year: yearOf(title),
-  description:
-    meta(html, 'description') ||
-    meta(html, 'og:description'),
+      var item = new MultimediaItem({
+        title: title,
+        url: url,
+        posterUrl: poster,
+        type: itemType,
+        year: yearOf(title),
+        description:
+          meta(html, 'description') ||
+          meta(html, 'og:description'),
 
-  // SkyStream uses an episode entry to enable
-  // the Play button, even for a movie.
-  episodes: itemType === 'movie'
-    ? [
-        new Episode({
-          name: 'Full Movie',
-          url: url,
-          season: 1,
-          episode: 1
-        })
-      ]
-    : []
-});
+        /*
+         * SkyStream uses an episode entry to
+         * enable Play, even for a movie.
+         *
+         * Series episode parsing is not yet
+         * implemented.
+         */
+        episodes: itemType === 'movie'
+          ? [
+              new Episode({
+                name: 'Full Movie',
+                url: url,
+                season: 1,
+                episode: 1
+              })
+            ]
+          : []
+      });
+
       callback({
         success: true,
         data: item
@@ -492,14 +497,14 @@ var item = new MultimediaItem({
     }
   }
 
-  // ====================================
+  // =====================================
   // STREAM HELPERS
-  // ====================================
+  // =====================================
 
   function mediaUrl(url) {
     /*
-     * MegaUp links can end in .mkv while
-     * returning HTML instead of a video file.
+     * MegaUp URLs can end in .mkv but still
+     * return an HTML page instead of video.
      */
     if (
       /^https?:\/\/(?:www\.)?megaup\.net\//i.test(url)
@@ -577,8 +582,8 @@ var item = new MultimediaItem({
 
   function tokenPage(html, page) {
     /*
-     * The V-Cloud Generate Download Link button
-     * stores its URL as double-encoded Base64.
+     * V-Cloud stores the Generate Download Link
+     * URL as double-encoded Base64.
      */
     var match = html.match(
       /atob\s*\(\s*atob\s*\(\s*["']([A-Za-z0-9+/=]+)["']\s*\)\s*\)/i
@@ -591,7 +596,6 @@ var item = new MultimediaItem({
     try {
       var decodedUrl = atob(atob(match[1]));
 
-      // Only follow a token URL on the same V-Cloud page.
       var cleanPage = page
         .split('?')[0]
         .split('#')[0];
@@ -608,11 +612,47 @@ var item = new MultimediaItem({
     }
   }
 
-  // ====================================
+  function qualityRank(stream) {
+    var label = String(
+      stream.source || ''
+    ).toUpperCase();
+
+    if (
+      label.indexOf('2160P') >= 0 ||
+      label.indexOf('4K') >= 0
+    ) {
+      return 2160;
+    }
+
+    if (
+      label.indexOf('1440P') >= 0 ||
+      label.indexOf('2K') >= 0
+    ) {
+      return 1440;
+    }
+
+    if (label.indexOf('1080P') >= 0) {
+      return 1080;
+    }
+
+    if (label.indexOf('720P') >= 0) {
+      return 720;
+    }
+
+    if (label.indexOf('480P') >= 0) {
+      return 480;
+    }
+
+    return 0;
+  }
+
+  // =====================================
   // LOAD STREAMS
-  // ====================================
+  // =====================================
 
   async function loadStreams(url, callback) {
+    url = normalizeRogUrl(url);
+
     try {
       if (mediaUrl(url)) {
         return callback({
@@ -650,13 +690,14 @@ var item = new MultimediaItem({
         } catch (error) {
           failures++;
 
-          var host = (page.match(/^https?:\/\/([^/]+)/i) || [])[1];
+          var host =
+            (page.match(/^https?:\/\/([^/]+)/i) || [])[1];
 
           console.error(
-          'Host request failed: ' +
-          (host || 'unknown host') +
-          ', step=' + depth +
-          ', error=' + String(error)
+            'Host request failed: ' +
+            (host || 'unknown host') +
+            ', step=' + depth +
+            ', error=' + String(error)
           );
 
           return;
@@ -684,7 +725,8 @@ var item = new MultimediaItem({
             found.push(
               new StreamResult({
                 url: link,
-                source: 'V-Cloud / Direct (' + quality + ')',
+                source:
+                  'V-Cloud / Direct (' + quality + ')',
                 quality: quality,
                 headers: {
                   Referer: page
@@ -701,17 +743,19 @@ var item = new MultimediaItem({
           }
         });
 
-        // Limit requests so large pages do not
-        // trigger an unlimited number of requests.
+        /*
+         * Request up to eight links, two at a time
+         * per page.
+         */
         var limited = next.slice(0, 8);
 
-for (var i = 0; i < limited.length; i += 2) {
-  await Promise.all(
-    limited.slice(i, i + 2).map(function (link) {
-      return scan(link, depth + 1, quality);
-    })
-  );
-}
+        for (var i = 0; i < limited.length; i += 2) {
+          await Promise.all(
+            limited.slice(i, i + 2).map(function (link) {
+              return scan(link, depth + 1, quality);
+            })
+          );
+        }
       }
 
       await scan(url, 0, 'Auto');
@@ -727,60 +771,39 @@ for (var i = 0; i < limited.length; i += 2) {
         });
       }
 
-      // Remove 480p and sort highest quality first.
-function qualityRank(stream) {
-  var label = String(stream.source || '').toUpperCase();
+      var sortedStreams = found
+        .filter(function (stream) {
+          return qualityRank(stream) !== 480;
+        })
+        .sort(function (a, b) {
+          var rankA = qualityRank(a);
+          var rankB = qualityRank(b);
 
-  if (label.includes('2160P') || label.includes('4K')) {
-    return 2160;
-  }
+          // Unknown quality goes last.
+          if (rankA === 0) {
+            return rankB === 0 ? 0 : 1;
+          }
 
-  if (label.includes('1440P') || label.includes('2K')) {
-    return 1440;
-  }
+          if (rankB === 0) {
+            return -1;
+          }
 
-  if (label.includes('1080P')) {
-    return 1080;
-  }
+          // 720p → 1080p → 2K → 4K.
+          return rankA - rankB;
+        });
 
-  if (label.includes('720P')) {
-    return 720;
-  }
-
-  if (label.includes('480P')) {
-    return 480;
-  }
-
-  // Unknown-quality links remain at the end.
-  return 0;
-}
-
-var sortedStreams = found
-  .filter(function (stream) {
-    return qualityRank(stream) !== 480;
-  })
-  .sort(function (a, b) {
-  var rankA = qualityRank(a);
-  var rankB = qualityRank(b);
-
-  if (rankA === 0) return rankB === 0 ? 0 : 1;
-  if (rankB === 0) return -1;
-
-  return rankA - rankB;
-});
-
-callback({
-  success: true,
-  data: sortedStreams
-});
+      callback({
+        success: true,
+        data: sortedStreams
+      });
     } catch (error) {
       fail(callback, error);
     }
   }
 
-  // ====================================
+  // =====================================
   // SKYSTREAM EXPORTS
-  // ====================================
+  // =====================================
 
   globalThis.getHome = getHome;
   globalThis.search = search;
