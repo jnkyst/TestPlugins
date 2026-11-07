@@ -1,9 +1,10 @@
+/*
+ * SkyStream RogMovies provider
+ * Use only media you are authorized to access.
+ */
+
 (function () {
   'use strict';
-
-  // =====================================
-  // GENERAL HELPERS
-  // =====================================
 
   function base() {
     return String(
@@ -30,9 +31,7 @@
   function text(value) {
     return decode(
       String(value || '').replace(/<[^>]*>/g, ' ')
-    )
-      .replace(/\s+/g, ' ')
-      .trim();
+    ).replace(/\s+/g, ' ').trim();
   }
 
   function attr(tag, name) {
@@ -92,23 +91,6 @@
         (response.status < 200 || response.status >= 400)
       )
     ) {
-      var body = String(
-        response && response.body
-          ? response.body
-          : ''
-      );
-
-      var networkError = body.match(
-        /\b(ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|CERT_[A-Z_]+|UNABLE_TO_[A-Z_]+|DEPTH_ZERO_SELF_SIGNED_CERT)\b/i
-      );
-
-      console.error(
-        'HTTP diagnostic: status=' +
-        (response && response.status) +
-        ', networkError=' +
-        (networkError ? networkError[1] : 'not identified')
-      );
-
       throw new Error(
         'HTTP request failed: ' +
         (response && response.status)
@@ -125,20 +107,14 @@
   }
 
   function kind(title) {
-    var seriesPattern =
-      /\b(series|season|episodes?|s\d{1,2}e\d{1,3}|tv[ -]?show)\b/i;
-
-    return seriesPattern.test(title)
+    return /\b(series|season|episodes?|s\d{1,2}e\d{1,3}|tv[ -]?show)\b/i.test(title)
       ? 'series'
       : 'movie';
   }
 
   function yearOf(title) {
     var match = title.match(/\b(19\d{2}|20\d{2})\b/);
-
-    return match
-      ? Number(match[1])
-      : undefined;
+    return match ? Number(match[1]) : undefined;
   }
 
   function fail(callback, error) {
@@ -146,9 +122,7 @@
       success: false,
       errorCode: 'UNKNOWN_ERROR',
       message: String(
-        error && error.message
-          ? error.message
-          : error
+        error && error.message ? error.message : error
       )
     });
   }
@@ -161,11 +135,10 @@
     var items = [];
     var seen = {};
 
-    var matches =
-      html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) ||
-      [];
+    var anchors =
+      html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
 
-    matches.forEach(function (anchor) {
+    anchors.forEach(function (anchor) {
       var opening =
         (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
 
@@ -182,9 +155,7 @@
       var image =
         (anchor.match(/<img\b[^>]*>/i) || [])[0] || '';
 
-      if (!image) {
-        return;
-      }
+      if (!image) return;
 
       var title = cleanTitle(
         attr(image, 'alt') || text(anchor)
@@ -195,9 +166,7 @@
         attr(image, 'src')
       );
 
-      if (!title || !poster) {
-        return;
-      }
+      if (!title || !poster) return;
 
       seen[href] = true;
 
@@ -237,18 +206,9 @@
 
   async function getHome(callback) {
     var sections = [
-      {
-        name: 'Latest Release',
-        path: '/'
-      },
-      {
-        name: 'TV Shows',
-        path: '/tv-shows/'
-      },
-      {
-        name: 'Netflix',
-        path: '/web-series/netflix/'
-      },
+      { name: 'Latest Release', path: '/' },
+      { name: 'TV Shows', path: '/tv-shows/' },
+      { name: 'Netflix', path: '/web-series/netflix/' },
       {
         name: 'Amazon Prime',
         path: '/web-series/amazon-prime-video/'
@@ -267,12 +227,10 @@
       var results = await Promise.all(
         sections.map(async function (section) {
           try {
-            var html = await get(
-              base() + section.path
-            );
-
             return {
-              items: listings(html),
+              items: listings(
+                await get(base() + section.path)
+              ),
               error: null
             };
           } catch (error) {
@@ -291,13 +249,11 @@
         })
       );
 
-      var allFailed = results.every(
-        function (result) {
+      if (
+        results.every(function (result) {
           return result.error;
-        }
-      );
-
-      if (allFailed) {
+        })
+      ) {
         throw new Error(
           'Unable to load any home section'
         );
@@ -415,6 +371,192 @@
   }
 
   // =====================================
+  // SERIES EPISODES
+  // =====================================
+
+  async function seriesEpisodes(html, seriesUrl) {
+    var groups = [];
+    var headings = [];
+    var headingRegex = /<h3\b[^>]*>[\s\S]*?<\/h3\s*>/gi;
+    var heading;
+
+    while ((heading = headingRegex.exec(html)) !== null) {
+      headings.push({
+        index: heading.index,
+        end: headingRegex.lastIndex,
+        label: text(heading[0])
+      });
+    }
+
+    headings.forEach(function (item, index) {
+      var seasonMatch = item.label.match(
+        /\bseason\s*(\d+)\b/i
+      );
+
+      var qualityMatch = item.label.match(
+        /\b(720p|1080p|1440p|2160p|2k|4k)\b/i
+      );
+
+      if (!seasonMatch || !qualityMatch) {
+        return;
+      }
+
+      var end =
+        index + 1 < headings.length
+          ? headings[index + 1].index
+          : html.length;
+
+      var section = html.slice(item.end, end);
+
+      var anchors =
+        section.match(
+          /<a\b[^>]*>[\s\S]*?<\/a\s*>/gi
+        ) || [];
+
+      anchors.forEach(function (anchor) {
+        var opening =
+          (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
+
+        var link = pageUrl(
+          attr(opening, 'href'),
+          seriesUrl
+        );
+
+        var isNexDrive =
+          /^https:\/\/(?:www\.)?nexdrive\.beer\//i.test(link);
+
+        var isVCloud =
+          /v\s*-?\s*cloud/i.test(text(anchor));
+
+        if (isNexDrive && isVCloud) {
+          groups.push({
+            url: link,
+            season: Number(seasonMatch[1]),
+            quality: qualityMatch[1].toUpperCase()
+          });
+        }
+      });
+    });
+
+    var pages = await Promise.all(
+      groups.slice(0, 12).map(async function (group) {
+        try {
+          return {
+            group: group,
+            html: await get(group.url)
+          };
+        } catch (error) {
+          console.error(
+            'Episode list request failed: ' +
+            String(error)
+          );
+
+          return null;
+        }
+      })
+    );
+
+    var byEpisode = {};
+
+    pages.forEach(function (page) {
+      if (!page) return;
+
+      var episodeHeadings = [];
+
+      var regex =
+        /<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]\s*>/gi;
+
+      var match;
+
+      while ((match = regex.exec(page.html)) !== null) {
+        var episodeMatch = text(match[0]).match(
+          /\bepisode\s*:?\s*(\d+)\b/i
+        );
+
+        if (episodeMatch) {
+          episodeHeadings.push({
+            index: match.index,
+            end: regex.lastIndex,
+            number: Number(episodeMatch[1])
+          });
+        }
+      }
+
+      episodeHeadings.forEach(function (episode, index) {
+        var end =
+          index + 1 < episodeHeadings.length
+            ? episodeHeadings[index + 1].index
+            : page.html.length;
+
+        var section = page.html.slice(
+          episode.end,
+          end
+        );
+
+        var links = extractLinks(
+          section,
+          page.group.url
+        ).filter(function (link) {
+          return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link);
+        });
+
+        if (!links.length) return;
+
+        var key =
+          page.group.season + ':' + episode.number;
+
+        if (!byEpisode[key]) {
+          byEpisode[key] = {
+            season: page.group.season,
+            number: episode.number,
+            links: []
+          };
+        }
+
+        links.forEach(function (link) {
+          var alreadyAdded = byEpisode[key].links.some(
+            function (entry) {
+              return entry.url === link;
+            }
+          );
+
+          if (!alreadyAdded) {
+            byEpisode[key].links.push({
+              url: link,
+              quality: page.group.quality
+            });
+          }
+        });
+      });
+    });
+
+    return Object.keys(byEpisode)
+      .map(function (key) {
+        var episode = byEpisode[key];
+
+        var episodeUrl =
+          seriesUrl.split('#')[0] +
+          '#skyepisode=' +
+          encodeURIComponent(
+            JSON.stringify(episode.links)
+          );
+
+        return new Episode({
+          name: 'Episode ' + episode.number,
+          url: episodeUrl,
+          season: episode.season,
+          episode: episode.number
+        });
+      })
+      .sort(function (a, b) {
+        return (
+          a.season - b.season ||
+          a.episode - b.episode
+        );
+      });
+  }
+
+  // =====================================
   // MOVIE / SERIES DETAILS
   // =====================================
 
@@ -469,13 +611,6 @@
           meta(html, 'description') ||
           meta(html, 'og:description'),
 
-        /*
-         * SkyStream uses an episode entry to
-         * enable Play, even for a movie.
-         *
-         * Series episode parsing is not yet
-         * implemented.
-         */
         episodes: itemType === 'movie'
           ? [
               new Episode({
@@ -485,7 +620,7 @@
                 episode: 1
               })
             ]
-          : []
+          : await seriesEpisodes(html, url)
       });
 
       callback({
@@ -502,10 +637,6 @@
   // =====================================
 
   function mediaUrl(url) {
-    /*
-     * MegaUp URLs can end in .mkv but still
-     * return an HTML page instead of video.
-     */
     if (
       /^https?:\/\/(?:www\.)?megaup\.net\//i.test(url)
     ) {
@@ -569,9 +700,7 @@
         ) || []
       )[0] || '';
 
-    var title = text(titleTag);
-
-    var match = title.match(
+    var match = text(titleTag).match(
       /\b(2160p|1080p|1440p|720p|480p|4k|2k)\b/i
     );
 
@@ -581,17 +710,11 @@
   }
 
   function tokenPage(html, page) {
-    /*
-     * V-Cloud stores the Generate Download Link
-     * URL as double-encoded Base64.
-     */
     var match = html.match(
       /atob\s*\(\s*atob\s*\(\s*["']([A-Za-z0-9+/=]+)["']\s*\)\s*\)/i
     );
 
-    if (!match) {
-      return '';
-    }
+    if (!match) return '';
 
     try {
       var decodedUrl = atob(atob(match[1]));
@@ -600,13 +723,11 @@
         .split('?')[0]
         .split('#')[0];
 
-      if (
-        decodedUrl.indexOf(cleanPage + '?token=') === 0
-      ) {
-        return decodedUrl;
-      }
-
-      return '';
+      return decodedUrl.indexOf(
+        cleanPage + '?token='
+      ) === 0
+        ? decodedUrl
+        : '';
     } catch (error) {
       return '';
     }
@@ -620,28 +741,16 @@
     if (
       label.indexOf('2160P') >= 0 ||
       label.indexOf('4K') >= 0
-    ) {
-      return 2160;
-    }
+    ) return 2160;
 
     if (
       label.indexOf('1440P') >= 0 ||
       label.indexOf('2K') >= 0
-    ) {
-      return 1440;
-    }
+    ) return 1440;
 
-    if (label.indexOf('1080P') >= 0) {
-      return 1080;
-    }
-
-    if (label.indexOf('720P') >= 0) {
-      return 720;
-    }
-
-    if (label.indexOf('480P') >= 0) {
-      return 480;
-    }
+    if (label.indexOf('1080P') >= 0) return 1080;
+    if (label.indexOf('720P') >= 0) return 720;
+    if (label.indexOf('480P') >= 0) return 480;
 
     return 0;
   }
@@ -654,7 +763,28 @@
     url = normalizeRogUrl(url);
 
     try {
-      if (mediaUrl(url)) {
+      var marker = '#skyepisode=';
+      var markerIndex = url.indexOf(marker);
+      var episodeLinks = null;
+
+      if (markerIndex >= 0) {
+        episodeLinks = JSON.parse(
+          decodeURIComponent(
+            url.slice(markerIndex + marker.length)
+          )
+        );
+
+        url = url.slice(0, markerIndex);
+
+        if (
+          !isSourcePage(url) ||
+          !Array.isArray(episodeLinks)
+        ) {
+          throw new Error('Invalid episode data');
+        }
+      }
+
+      if (!episodeLinks && mediaUrl(url)) {
         return callback({
           success: true,
           data: [
@@ -743,10 +873,6 @@
           }
         });
 
-        /*
-         * Request up to eight links, two at a time
-         * per page.
-         */
         var limited = next.slice(0, 8);
 
         for (var i = 0; i < limited.length; i += 2) {
@@ -758,7 +884,28 @@
         }
       }
 
-      await scan(url, 0, 'Auto');
+      if (episodeLinks) {
+        var validLinks = episodeLinks
+          .filter(function (entry) {
+            return (
+              entry &&
+              /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(entry.url)
+            );
+          })
+          .slice(0, 8);
+
+        await Promise.all(
+          validLinks.map(function (entry) {
+            return scan(
+              entry.url,
+              0,
+              String(entry.quality || 'Auto')
+            );
+          })
+        );
+      } else {
+        await scan(url, 0, 'Auto');
+      }
 
       if (!found.length && failures) {
         return callback({
@@ -779,7 +926,6 @@
           var rankA = qualityRank(a);
           var rankB = qualityRank(b);
 
-          // Unknown quality goes last.
           if (rankA === 0) {
             return rankB === 0 ? 0 : 1;
           }
@@ -788,7 +934,6 @@
             return -1;
           }
 
-          // 720p → 1080p → 2K → 4K.
           return rankA - rankB;
         });
 
