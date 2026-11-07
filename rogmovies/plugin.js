@@ -509,7 +509,7 @@ var item = new MultimediaItem({
 
     return (
       /^https?:\/\/[^\s]+\.(?:mp4|m3u8|mkv)(?:[?#].*)?$/i.test(url) ||
-      /^https:\/\/pub-d888f9ac9b9f48ec9cfd894703c927c5\.r2\.dev\//i.test(url)
+      /^https:\/\/pub-[a-f0-9]{32}\.r2\.dev\//i.test(url)
     );
   }
 
