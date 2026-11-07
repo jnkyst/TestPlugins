@@ -497,7 +497,7 @@
           section,
           page.group.url
         ).filter(function (link) {
-          return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link);
+          return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isVDrive(link);
         });
 
         if (!links.length) return;
@@ -755,6 +755,66 @@
     return 0;
   }
 
+  // Vega Drive share pages require a session and prepare a short-lived URL.
+  function isVDrive(url) {
+    return /^https:\/\/one\.vegadrive\.(?:me|app)\/s\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(url || '');
+  }
+
+  async function resolveVDrive(shareUrl) {
+    var match = String(shareUrl).match(/^https:\/\/one\.vegadrive\.(?:me|app)\/s\/([A-Za-z0-9_-]+)\/?(?:\?.*)?$/i);
+    if (!match) throw new Error('Unsupported V-Drive share URL');
+    var id = match[1];
+    var root = 'https://one.vegadrive.me';
+    var jar = {};
+
+    async function request(url, referer, accept) {
+      var headers = { 'User-Agent': 'Mozilla/5.0', 'Accept': accept || 'text/html,application/xhtml+xml' };
+      if (referer) headers.Referer = referer;
+      var cookies = Object.keys(jar).map(function (key) { return key + '=' + jar[key]; }).join('; ');
+      if (cookies) headers.Cookie = cookies;
+      var response = await http_get(url, headers);
+      if (!response || (response.status && (response.status < 200 || response.status >= 400))) {
+        throw new Error('V-Drive HTTP ' + (response && response.status));
+      }
+      var all = response.headers || {};
+      var cookieValue = all['set-cookie'] || all['Set-Cookie'] || all['set-Cookie'];
+      if (cookieValue) {
+        var list = Array.isArray(cookieValue) ? cookieValue : String(cookieValue).split(/,(?=\s*[^;,\s=]+\s*=)/);
+        list.forEach(function (c) {
+          var first = String(c).split(';')[0];
+          var equal = first.indexOf('=');
+          if (equal > 0) jar[first.slice(0, equal).trim()] = first.slice(equal + 1).trim();
+        });
+      }
+      return String(response.body || '');
+    }
+
+    var share = root + '/s/' + id;
+    var intermediate = root + '/d/' + id + '/skydrop';
+    await request(share);
+    await request(intermediate, share);
+    var prepare = root + '/__vega_bridge/prepare/' + id + '?provider=skydrop';
+    var fetchLink = root + '/download-link/' + id + '/skydrop';
+    var data;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      data = JSON.parse(await request(prepare, intermediate, 'application/json'));
+      if (data.ready === true) {
+        if (typeof data.download_url !== 'string') {
+          data = JSON.parse(await request(fetchLink, intermediate, 'application/json'));
+        }
+        if (data.ready === true && typeof data.download_url === 'string') {
+          // Only accept Google-hosted HTTPS URLs, as Vega Drive's page does.
+          if (!/^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com(?::443)?\//i.test(data.download_url)) {
+            throw new Error('Unexpected V-Drive download host');
+          }
+          return data.download_url;
+        }
+      }
+      if (attempt < 2) await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+    }
+    throw new Error('V-Drive link not ready');
+  }
+
   // =====================================
   // LOAD STREAMS
   // =====================================
@@ -797,7 +857,7 @@
         });
       }
 
-      if (!isSourcePage(url) && !nextHost(url)) {
+      if (!isSourcePage(url) && !nextHost(url) && !isVDrive(url)) {
         throw new Error('Unsupported page URL');
       }
 
@@ -805,6 +865,7 @@
       var seenStreams = {};
       var found = [];
       var failures = 0;
+      var vdriveCandidates = [];
 
       async function scan(page, depth, quality) {
         if (seenPages[page] || depth > 3) {
@@ -863,6 +924,10 @@
                 }
               })
             );
+          } else if (isVDrive(link)) {
+            if (!vdriveCandidates.some(function (entry) { return entry.url === link; })) {
+              vdriveCandidates.push({ url: link, quality: quality });
+            }
           } else if (
             depth < 3 &&
             nextHost(link) &&
@@ -889,22 +954,41 @@
           .filter(function (entry) {
             return (
               entry &&
-              /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(entry.url)
+              (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(entry.url) || isVDrive(entry.url))
             );
           })
           .slice(0, 8);
 
+        validLinks.forEach(function (entry) {
+          if (isVDrive(entry.url)) vdriveCandidates.push(entry);
+        });
         await Promise.all(
-          validLinks.map(function (entry) {
-            return scan(
-              entry.url,
-              0,
-              String(entry.quality || 'Auto')
-            );
+          validLinks.filter(function (entry) { return !isVDrive(entry.url); }).map(function (entry) {
+            return scan(entry.url, 0, String(entry.quality || 'Auto'));
           })
         );
+      } else if (isVDrive(url)) {
+        vdriveCandidates.push({ url: url, quality: 'Auto' });
       } else {
         await scan(url, 0, 'Auto');
+      }
+
+      // Only try V-Drive when no usable V-Cloud/direct result was found.
+      if (!found.some(function (stream) { return qualityRank(stream) !== 480; }) && vdriveCandidates.length) {
+        var fallback = vdriveCandidates.slice(0, 8);
+        for (var j = 0; j < fallback.length; j++) {
+          try {
+            var video = await resolveVDrive(fallback[j].url);
+            if (!seenStreams[video]) {
+              seenStreams[video] = true;
+              var label = String(fallback[j].quality || 'Auto');
+              found.push(new StreamResult({ url: video, source: 'V-Drive (' + label + ')', quality: label }));
+            }
+          } catch (error) {
+            failures++;
+            console.error('V-Drive fallback failed: ' + String(error));
+          }
+        }
       }
 
       if (!found.length && failures) {
