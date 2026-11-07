@@ -4,10 +4,10 @@
   "version": 2,
   "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
   "domains": [
-    "https://rogmovies.im"
+    "https://rogmovies.asia/"
   ],
   "author": "Jnkyst",
-  "baseUrl": "https://rogmovies.im",
+  "baseUrl": "https://rogmovies.asia/",
   "authors": [
     "Deepak"
   ],
