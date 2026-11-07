@@ -394,7 +394,7 @@
         var link = pageUrl(attr(tag, 'href'), seriesUrl);
         if (!/^https:\/\/(?:www\.)?nexdrive\.beer\//i.test(link)) return;
         var label = text(a);
-        if (!/v\s*-?\s*cloud|download\s*now/i.test(label)) return;
+        if (!/v\s*-?\s*cloud|download\s*now|episode\s*links/i.test(label)) return;
         if (!groups.some(function (g) { return g.url === link; })) groups.push({url:link, season:season, quality:q[1].toUpperCase(), start:range ? Number(range[1]) : 0, end:range ? Number(range[2]) : 0});
       });
     });
@@ -862,8 +862,9 @@
         await scan(url, 0, 'Auto');
       }
 
-      // Only try V-Drive when no usable V-Cloud/direct result was found.
-      if (!found.some(function (stream) { return qualityRank(stream) !== 480; }) && vdriveCandidates.length) {
+      // Offer V-Drive after V-Cloud as a playback backup. Playback failures occur
+      // in the player after this function returns and cannot be detected here.
+      if (vdriveCandidates.length) {
         var fallback = vdriveCandidates.slice(0, 8);
         for (var j = 0; j < fallback.length; j++) {
           try {
@@ -907,7 +908,10 @@
             return -1;
           }
 
-          return rankA - rankB;
+          if (rankA !== rankB) return rankA - rankB;
+          var aBackup = /^V-Drive\b/i.test(String(a.source || ''));
+          var bBackup = /^V-Drive\b/i.test(String(b.source || ''));
+          return aBackup === bBackup ? 0 : (aBackup ? 1 : -1);
         });
 
       callback({
