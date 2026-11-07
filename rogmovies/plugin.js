@@ -375,185 +375,74 @@
   // =====================================
 
   async function seriesEpisodes(html, seriesUrl) {
+    var titleTag = (html.match(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/i) || [])[0] || '';
+    var fallbackSeasonMatch = text(titleTag).match(/\bseason\s*(\d+)\b|\bs0*(\d+)/i);
+    var fallbackSeason = fallbackSeasonMatch ? Number(fallbackSeasonMatch[1] || fallbackSeasonMatch[2]) : 1;
+    var heads = [], re = /<h[2-6]\b[^>]*>[\s\S]*?<\/h[2-6]\s*>/gi, m;
+    while ((m = re.exec(html)) !== null) heads.push({start: m.index, end: re.lastIndex, label: text(m[0])});
     var groups = [];
-    var headings = [];
-    var headingRegex = /<h3\b[^>]*>[\s\S]*?<\/h3\s*>/gi;
-    var heading;
-
-    while ((heading = headingRegex.exec(html)) !== null) {
-      headings.push({
-        index: heading.index,
-        end: headingRegex.lastIndex,
-        label: text(heading[0])
+    heads.forEach(function (h, i) {
+      var q = h.label.match(/\b(720p|1080p|1440p|2160p|2k|4k)\b/i);
+      if (!q) return;
+      var sm = h.label.match(/\bseason\s*(\d+)\b|\bs0*(\d+)/i);
+      var season = sm ? Number(sm[1] || sm[2]) : fallbackSeason;
+      var range = h.label.match(/(?:episodes?\s*[.:]?\s*|\bs\d+\s*\.\s*e\s*)(\d+)\s*(?:[-–—+]|\bto\b)\s*(?:e(?:p(?:isode)?)?\s*)?(\d+)/i);
+      var section = html.slice(h.end, i + 1 < heads.length ? heads[i + 1].start : html.length);
+      var anchors = section.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+      anchors.forEach(function (a) {
+        var tag = (a.match(/^<a\b[^>]*>/i) || [])[0] || '';
+        var link = pageUrl(attr(tag, 'href'), seriesUrl);
+        if (!/^https:\/\/(?:www\.)?nexdrive\.beer\//i.test(link)) return;
+        var label = text(a);
+        if (!/v\s*-?\s*cloud|download\s*now/i.test(label)) return;
+        if (!groups.some(function (g) { return g.url === link; })) groups.push({url:link, season:season, quality:q[1].toUpperCase(), start:range ? Number(range[1]) : 0, end:range ? Number(range[2]) : 0});
+      });
+    });
+    var pages = [];
+    for (var start = 0; start < Math.min(groups.length, 32); start += 3) {
+      var batch = await Promise.all(groups.slice(start, start + 3).map(async function (group) {
+        try { return {group:group, html:await get(group.url)}; }
+        catch (e) { console.error('Episode list request failed: ' + String(e)); return null; }
+      }));
+      pages = pages.concat(batch);
+    }
+    var entries = {};
+    function add(group, first, last, links) {
+      if (!first || !links.length) return;
+      last = last || first;
+      var key = group.season + ':' + first + ':' + last;
+      if (!entries[key]) entries[key] = {season:group.season, first:first, last:last, links:[]};
+      links.forEach(function (url) {
+        if (!entries[key].links.some(function (e) { return e.url === url; })) entries[key].links.push({url:url, quality:group.quality});
       });
     }
-
-    headings.forEach(function (item, index) {
-      var seasonMatch = item.label.match(
-        /\bseason\s*(\d+)\b/i
-      );
-
-      var qualityMatch = item.label.match(
-        /\b(720p|1080p|1440p|2160p|2k|4k)\b/i
-      );
-
-      if (!seasonMatch || !qualityMatch) {
-        return;
-      }
-
-      var end =
-        index + 1 < headings.length
-          ? headings[index + 1].index
-          : html.length;
-
-      var section = html.slice(item.end, end);
-
-      var anchors =
-        section.match(
-          /<a\b[^>]*>[\s\S]*?<\/a\s*>/gi
-        ) || [];
-
-      anchors.forEach(function (anchor) {
-        var opening =
-          (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
-
-        var link = pageUrl(
-          attr(opening, 'href'),
-          seriesUrl
-        );
-
-        var isNexDrive =
-          /^https:\/\/(?:www\.)?nexdrive\.beer\//i.test(link);
-
-        var isVCloud =
-          /v\s*-?\s*cloud/i.test(text(anchor));
-
-        if (isNexDrive && isVCloud) {
-          groups.push({
-            url: link,
-            season: Number(seasonMatch[1]),
-            quality: qualityMatch[1].toUpperCase()
-          });
-        }
-      });
-    });
-
-    var pages = await Promise.all(
-      groups.slice(0, 12).map(async function (group) {
-        try {
-          return {
-            group: group,
-            html: await get(group.url)
-          };
-        } catch (error) {
-          console.error(
-            'Episode list request failed: ' +
-            String(error)
-          );
-
-          return null;
-        }
-      })
-    );
-
-    var byEpisode = {};
-
     pages.forEach(function (page) {
       if (!page) return;
-
-      var episodeHeadings = [];
-
-      var regex =
-        /<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]\s*>/gi;
-
-      var match;
-
-      while ((match = regex.exec(page.html)) !== null) {
-        var episodeMatch = text(match[0]).match(
-          /\bepisode\s*:?\s*(\d+)\b/i
-        );
-
-        if (episodeMatch) {
-          episodeHeadings.push({
-            index: match.index,
-            end: regex.lastIndex,
-            number: Number(episodeMatch[1])
-          });
-        }
+      var episodeHeads = [], er = /<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]\s*>/gi, match;
+      while ((match = er.exec(page.html)) !== null) {
+        var label = text(match[0]);
+        var ep = label.match(/\bepisodes?\s*[.:]?\s*(\d+)(?:\s*(?:[-–—+]|\bto\b)\s*(?:ep?\s*)?(\d+))?/i);
+        if (ep) episodeHeads.push({start:match.index, end:er.lastIndex, first:Number(ep[1]), last:ep[2] ? Number(ep[2]) : Number(ep[1])});
       }
-
-      episodeHeadings.forEach(function (episode, index) {
-        var end =
-          index + 1 < episodeHeadings.length
-            ? episodeHeadings[index + 1].index
-            : page.html.length;
-
-        var section = page.html.slice(
-          episode.end,
-          end
-        );
-
-        var links = extractLinks(
-          section,
-          page.group.url
-        ).filter(function (link) {
-          return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isVDrive(link);
+      if (!episodeHeads.length) {
+        // A single file may contain a range of episodes; list it as a pack,
+        // not as individual playable episodes.
+        if (page.group.start) add(page.group, page.group.start, page.group.end, [page.group.url]);
+        return;
+      }
+      episodeHeads.forEach(function (ep, i) {
+        var end = i + 1 < episodeHeads.length ? episodeHeads[i + 1].start : page.html.length;
+        var links = extractLinks(page.html.slice(ep.end, end), page.group.url).filter(function (url) {
+          return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url) || isVDrive(url);
         });
-
-        if (!links.length) return;
-
-        var key =
-          page.group.season + ':' + episode.number;
-
-        if (!byEpisode[key]) {
-          byEpisode[key] = {
-            season: page.group.season,
-            number: episode.number,
-            links: []
-          };
-        }
-
-        links.forEach(function (link) {
-          var alreadyAdded = byEpisode[key].links.some(
-            function (entry) {
-              return entry.url === link;
-            }
-          );
-
-          if (!alreadyAdded) {
-            byEpisode[key].links.push({
-              url: link,
-              quality: page.group.quality
-            });
-          }
-        });
+        add(page.group, ep.first, ep.last, links);
       });
     });
-
-    return Object.keys(byEpisode)
-      .map(function (key) {
-        var episode = byEpisode[key];
-
-        var episodeUrl =
-          seriesUrl.split('#')[0] +
-          '#skyepisode=' +
-          encodeURIComponent(
-            JSON.stringify(episode.links)
-          );
-
-        return new Episode({
-          name: 'Episode ' + episode.number,
-          url: episodeUrl,
-          season: episode.season,
-          episode: episode.number
-        });
-      })
-      .sort(function (a, b) {
-        return (
-          a.season - b.season ||
-          a.episode - b.episode
-        );
-      });
+    return Object.keys(entries).map(function (key) {
+      var ep = entries[key];
+      var name = ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
+      return new Episode({name:name, url:seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links)), season:ep.season, episode:ep.first});
+    }).sort(function (a,b) { return a.season-b.season || a.episode-b.episode; });
   }
 
   // =====================================
@@ -954,7 +843,7 @@
           .filter(function (entry) {
             return (
               entry &&
-              (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(entry.url) || isVDrive(entry.url))
+              (nextHost(entry.url) || isVDrive(entry.url))
             );
           })
           .slice(0, 8);
