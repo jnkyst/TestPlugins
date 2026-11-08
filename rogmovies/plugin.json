@@ -1,7 +1,7 @@
 {
   "packageName": "com.jnkyst.repo.rogmovies",
   "name": "Rogmovies",
-  "version": 2,
+  "version": 3,
   "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
   "domains": [
     "https://rogmovies.asia/"
