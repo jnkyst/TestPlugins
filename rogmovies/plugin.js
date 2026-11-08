@@ -407,6 +407,7 @@
       pages = pages.concat(batch);
     }
     var entries = {};
+    var seasonFiles = [];
     function add(group, first, last, links) {
       if (!first || !links.length) return;
       last = last || first;
@@ -427,7 +428,17 @@
       if (!episodeHeads.length) {
         // A single file may contain a range of episodes; list it as a pack,
         // not as individual playable episodes.
-        if (page.group.start) add(page.group, page.group.start, page.group.end, [page.group.url]);
+        if (page.group.start) {
+          add(page.group, page.group.start, page.group.end, [page.group.url]);
+        } else {
+          // When the site offers a season file without individual episode
+          // headings, keep the season file as one item, not fake episodes.
+          var hasHost = extractLinks(page.html, page.group.url).some(function (link) {
+            return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isVDrive(link);
+          });
+          var pageTitle = text((page.html.match(/<title\b[^>]*>[\s\S]*?<\/title\s*>/i) || [])[0] || '');
+          if (hasHost && /\b(?:season\s*\d+|s0*\d+)\b/i.test(pageTitle)) seasonFiles.push(page.group);
+        }
         return;
       }
       episodeHeads.forEach(function (ep, i) {
@@ -438,9 +449,15 @@
         add(page.group, ep.first, ep.last, links);
       });
     });
+    if (!Object.keys(entries).length && seasonFiles.length) {
+      seasonFiles.forEach(function (group) {
+        add(group, 1, 1, [group.url]);
+        entries[group.season + ':1:1'].seasonFile = true;
+      });
+    }
     return Object.keys(entries).map(function (key) {
       var ep = entries[key];
-      var name = ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
+      var name = ep.seasonFile ? 'Season ' + ep.season + ' (single file)' : ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
       return new Episode({name:name, url:seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links)), season:ep.season, episode:ep.first});
     }).sort(function (a,b) { return a.season-b.season || a.episode-b.episode; });
   }
@@ -578,7 +595,9 @@
   }
 
   function nextHost(url) {
-    return /^https:\/\/(?:www\.)?(?:nexdrive\.beer|vcloud\.beer)\//i.test(url);
+    if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
+    // Ignore NexDrive navigation/category pages, which contain unrelated files.
+    return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
   }
 
   function qualityFrom(html, fallback) {
@@ -788,6 +807,13 @@
         var links = extractLinks(html, page);
         var next = [];
         var pixelCandidates = [];
+        // Only explicit V-Drive download buttons, not arbitrary navigation links.
+        var vdriveButtons = (html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || []).filter(function (anchor) {
+          return /v\s*-?\s*drive/i.test(text(anchor));
+        }).map(function (anchor) {
+          var tag = (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
+          return pageUrl(attr(tag, 'href'), page);
+        });
 
         if (
           /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(page)
@@ -826,7 +852,7 @@
                      /^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:[?#].*)?$/i.test(link)) {
             var pixelId = link.match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/i)[1];
             if (pixelCandidates.indexOf(pixelId) < 0) pixelCandidates.push(pixelId);
-          } else if (isVDrive(link)) {
+          } else if (isVDrive(link) && vdriveButtons.indexOf(link) >= 0) {
             if (!vdriveCandidates.some(function (entry) { return entry.url === link; })) {
               vdriveCandidates.push({ url: link, quality: quality });
             }
