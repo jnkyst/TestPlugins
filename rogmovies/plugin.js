@@ -787,6 +787,7 @@
 
         var links = extractLinks(html, page);
         var next = [];
+        var pixelCandidates = [];
 
         if (
           /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(page)
@@ -795,6 +796,14 @@
 
           if (tokenUrl) {
             links.push(tokenUrl);
+          }
+
+          // Some V-Cloud pages replace a placeholder PixelServer href using
+          // `var pxl = "..."; document.getElementById("pxl-1").href = pxl;`.
+          // Read only this constrained pattern; never execute remote scripts.
+          if (/document\.getElementById\s*\(\s*["']pxl-1["']\s*\)\s*\.href\s*=\s*pxl\s*;/i.test(html)) {
+            var pixelAssignment = html.match(/\b(?:var|let|const)\s+pxl\s*=\s*["'](https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?)["']/i);
+            if (pixelAssignment) links.push(pixelAssignment[1]);
           }
         }
 
@@ -815,17 +824,8 @@
             );
           } else if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(page) &&
                      /^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:[?#].*)?$/i.test(link)) {
-            // PixelServer is a landing page; its file API is the media endpoint.
             var pixelId = link.match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/i)[1];
-            var pixelVideo = 'https://pixeldrain.dev/api/file/' + pixelId;
-            if (!seenStreams[pixelVideo]) {
-              seenStreams[pixelVideo] = true;
-              found.push(new StreamResult({
-                url: pixelVideo,
-                source: 'V-Cloud / PixelServer (' + quality + ')',
-                quality: quality
-              }));
-            }
+            if (pixelCandidates.indexOf(pixelId) < 0) pixelCandidates.push(pixelId);
           } else if (isVDrive(link)) {
             if (!vdriveCandidates.some(function (entry) { return entry.url === link; })) {
               vdriveCandidates.push({ url: link, quality: quality });
@@ -839,6 +839,26 @@
             next.push(link);
           }
         });
+
+        // V-Cloud pages can contain unrelated or dead PixelServer links.
+        // Validate each file using its small metadata response, never the video body.
+        await Promise.all(pixelCandidates.slice(0, 8).map(async function (id) {
+          try {
+            var infoUrl = 'https://pixeldrain.dev/api/file/' + id + '/info';
+            var response = await http_get(infoUrl, { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' });
+            if (!response || response.status < 200 || response.status >= 300) return;
+            var info = JSON.parse(String(response.body || ''));
+            if (!info || info.success !== true || info.can_download === false ||
+                !/^video\//i.test(String(info.mime_type || ''))) return;
+            var pixelVideo = 'https://pixeldrain.dev/api/file/' + id;
+            if (!seenStreams[pixelVideo]) {
+              seenStreams[pixelVideo] = true;
+              found.push(new StreamResult({url: pixelVideo, source: 'V-Cloud / PixelServer (' + quality + ')', quality: quality}));
+            }
+          } catch (error) {
+            console.error('PixelServer metadata check failed: ' + String(error));
+          }
+        }));
 
         var limited = next.slice(0, 8);
 
