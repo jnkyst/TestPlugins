@@ -813,6 +813,19 @@
                 }
               })
             );
+          } else if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(page) &&
+                     /^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:[?#].*)?$/i.test(link)) {
+            // PixelServer is a landing page; its file API is the media endpoint.
+            var pixelId = link.match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/i)[1];
+            var pixelVideo = 'https://pixeldrain.dev/api/file/' + pixelId;
+            if (!seenStreams[pixelVideo]) {
+              seenStreams[pixelVideo] = true;
+              found.push(new StreamResult({
+                url: pixelVideo,
+                source: 'V-Cloud / PixelServer (' + quality + ')',
+                quality: quality
+              }));
+            }
           } else if (isVDrive(link)) {
             if (!vdriveCandidates.some(function (entry) { return entry.url === link; })) {
               vdriveCandidates.push({ url: link, quality: quality });
@@ -909,9 +922,11 @@
           }
 
           if (rankA !== rankB) return rankA - rankB;
-          var aBackup = /^V-Drive\b/i.test(String(a.source || ''));
-          var bBackup = /^V-Drive\b/i.test(String(b.source || ''));
-          return aBackup === bBackup ? 0 : (aBackup ? 1 : -1);
+          function sourceRank(stream) {
+            var label = String(stream.source || '');
+            return /^V-Drive\b/i.test(label) ? 2 : /PixelServer/i.test(label) ? 1 : 0;
+          }
+          return sourceRank(a) - sourceRank(b);
         });
 
       callback({
