@@ -2,32 +2,21 @@
   "packageName": "com.jnkyst.repo.vegamovies",
   "name": "Vegamovies",
   "version": 1,
-  "baseUrl": "https://new1.vegamovies.lease/",
-  "description": "VegaMovies and RogMovies providers",
-  "providers": [
-    {
-      "id": "vegamovies",
-      "name": "VegaMovies",
-      "baseUrl": "https://new1.vegamovies.lease/"
-    },
-    {
-      "id": "rogmovies",
-      "name": "RogMovies",
-      "baseUrl": "https://rogmovies.im/"
-    }
+   "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
+  "domains": [
+    "https://vegamovies.lease/"
   ],
+  "author": "Jnkyst",
+  "baseUrl": "https://vegamovies.lease/",
   "authors": [
-    "Jnkyst"
+    "Deepak"
   ],
   "languages": [
     "hi",
-    "en",
-    "te",
-    "ta",
-    "ma"
+    "en"
   ],
   "categories": [
     "Movies",
-    "series"
+    "Series"
   ]
 }
