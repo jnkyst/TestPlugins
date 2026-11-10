@@ -223,7 +223,7 @@
   {
     "packageName": "com.jnkyst.repo.vegamovies",
     "name": "VegaMovies",
-    "version": 2,
+    "version": 3,
     "description": "Provider for VegaMovies (Bollywood, Hollywood & Hindi Dubbed)",
     "domains": [
       "https://vegamovies.lease/"

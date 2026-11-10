@@ -503,7 +503,21 @@
         return Object.keys(entries).map(function (key) {
             var ep = entries[key];
             var name = ep.seasonFile ? 'Season ' + ep.season + ' (single file)' : ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
-            return new Episode({ name: name, url: seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links)), season: ep.season, episode: ep.first });
+            var fallbackUrl = seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links));
+            var fastDirect = ep.links.find(function (entry) {
+                return entry && isFastDl(entry.url);
+            });
+
+            // Keep episode URLs short and directly resolvable. Use the encoded
+            // multi-host form only when an episode has no FastDL link.
+            return new Episode({
+                name: name,
+                url: fastDirect
+                    ? fastDirect.url + '&quality=' + encodeURIComponent(fastDirect.quality || 'Auto')
+                    : fallbackUrl,
+                season: ep.season,
+                episode: ep.first
+            });
         }).sort(function (a, b) { return a.season - b.season || a.episode - b.episode; });
     }
 
@@ -542,6 +556,16 @@
             var banner = tmdbSize(originalPoster, 'w1280');
 
             var itemType = kind(title, url);
+            var episodes = itemType === 'movie'
+                ? [
+                    new Episode({
+                        name: 'Full Movie',
+                        url: url,
+                        season: 1,
+                        episode: 1
+                    })
+                ]
+                : await seriesEpisodes(html, url);
 
             var item = new MultimediaItem({
                 title: title,
@@ -553,17 +577,7 @@
                 description:
                     meta(html, 'description') ||
                     meta(html, 'og:description'),
-
-                episodes: itemType === 'movie'
-                    ? [
-                        new Episode({
-                            name: 'Full Movie',
-                            url: url,
-                            season: 1,
-                            episode: 1
-                        })
-                    ]
-                    : await seriesEpisodes(html, url)
+                episodes: episodes
             });
 
             callback({
@@ -923,6 +937,11 @@
                 }
             }
 
+            var initialQualityMatch = url.match(/[?&]quality=([^&]+)/i);
+            var initialQuality = initialQualityMatch
+                ? decodeURIComponent(initialQualityMatch[1])
+                : 'Auto';
+
             if (episodeLinks) {
                 var validLinks = episodeLinks
                     .filter(function (entry) {
@@ -941,7 +960,7 @@
             } else if (isVDrive(url)) {
                 vdriveCandidates.push({ url: url, quality: 'Auto' });
             } else {
-                await scan(url, 0, 'Auto');
+                await scan(url, 0, initialQuality);
             }
 
             // Offer V-Drive after V-Cloud as a playback backup. Playback failures occur
