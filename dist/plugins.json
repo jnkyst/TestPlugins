@@ -199,7 +199,7 @@
   },
   {
     "packageName": "com.jnkyst.repo.rogmovies",
-    "name": "Rogmovies",
+    "name": "RogMovies",
     "version": 3,
     "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
     "domains": [
@@ -223,7 +223,7 @@
   {
     "packageName": "com.jnkyst.repo.vegamovies",
     "name": "VegaMovies",
-    "version": 1,
+    "version": 2,
     "description": "Provider for VegaMovies (Bollywood, Hollywood & Hindi Dubbed)",
     "domains": [
       "https://vegamovies.lease/"
