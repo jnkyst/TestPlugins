@@ -1,8 +1,8 @@
 {
   "packageName": "com.jnkyst.repo.vegamovies",
-  "name": "Vegamovies",
+  "name": "VegaMovies",
   "version": 1,
-   "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
+  "description": "Provider for VegaMovies (Bollywood, Hollywood & Hindi Dubbed)",
   "domains": [
     "https://vegamovies.lease/"
   ],
