@@ -74,6 +74,41 @@
         return url ? base() + '/' + url : '';
     }
 
+    function directImageUrl(url) {
+        url = absolute(url);
+
+        // VegaMovies' og:image is an image-proxy URL. SkyStream's image
+        // loader may reject that proxied WebP response. The proxy's `u`
+        // parameter contains the original image URL encoded with Base64.
+        if (/^https:\/\/img\.vegamovies\.lease\//i.test(url)) {
+            var match = url.match(/[?&]u=([^&]+)/i);
+
+            if (match) {
+                try {
+                    var encoded = decodeURIComponent(match[1])
+                        .replace(/-/g, '+')
+                        .replace(/_/g, '/');
+                    var original = atob(encoded);
+
+                    if (/^https:\/\/image\.tmdb\.org\/t\/p\/[a-z0-9]+\/[A-Za-z0-9]+\.(?:jpe?g|png|webp)$/i.test(original)) {
+                        return original;
+                    }
+                } catch (error) {
+                    console.error('Could not decode poster URL: ' + String(error));
+                }
+            }
+        }
+
+        return url;
+    }
+
+    function tmdbSize(url, size) {
+        return String(url || '').replace(
+            /^(https:\/\/image\.tmdb\.org\/t\/p\/)[a-z0-9]+(\/[A-Za-z0-9]+\.(?:jpe?g|png|webp))$/i,
+            '$1' + size + '$2'
+        );
+    }
+
     function isSourcePage(url) {
         return url.indexOf(base() + '/') === 0;
     }
@@ -500,9 +535,11 @@
             var imageTag =
                 (html.match(/<meta\b(?=[^>]*\bitemprop=["']image["'])[^>]*>/i) || [])[0];
 
-            var poster = absolute(
+            var originalPoster = directImageUrl(
                 attr(imageTag, 'content') || meta(html, 'og:image')
             );
+            var poster = tmdbSize(originalPoster, 'w500');
+            var banner = tmdbSize(originalPoster, 'w1280');
 
             var itemType = kind(title, url);
 
@@ -510,6 +547,7 @@
                 title: title,
                 url: url,
                 posterUrl: poster,
+                bannerUrl: banner,
                 type: itemType,
                 year: yearOf(title),
                 description:
