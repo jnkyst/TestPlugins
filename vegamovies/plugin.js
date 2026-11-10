@@ -439,7 +439,7 @@
                 var link = pageUrl(attr(tag, 'href'), seriesUrl);
                 if (!/^https:\/\/(?:www\.)?nexdrive\.beer\//i.test(link)) return;
                 var label = text(a);
-                if (!/v\s*-?\s*cloud|download\s*now|episode\s*links/i.test(label)) return;
+                if (!/v\s*-?\s*cloud|g\s*-?\s*direct|batch\s*\/\s*zip|download\s*now|episode\s*links/i.test(label)) return;
                 if (!groups.some(function (g) { return g.url === link; })) groups.push({ url: link, season: season, quality: q[1].toUpperCase(), start: range ? Number(range[1]) : 0, end: range ? Number(range[2]) : 0 });
             });
         });
@@ -479,7 +479,7 @@
                     // When the site offers a season file without individual episode
                     // headings, keep the season file as one item, not fake episodes.
                     var hasHost = extractLinks(page.html, page.group.url).some(function (link) {
-                        return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isVDrive(link);
+                        return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isFastDl(link) || isVDrive(link);
                     });
                     var pageTitle = text((page.html.match(/<title\b[^>]*>[\s\S]*?<\/title\s*>/i) || [])[0] || '');
                     if (hasHost && /\b(?:season\s*\d+|s0*\d+)\b/i.test(pageTitle)) seasonFiles.push(page.group);
@@ -489,7 +489,7 @@
             episodeHeads.forEach(function (ep, i) {
                 var end = i + 1 < episodeHeads.length ? episodeHeads[i + 1].start : page.html.length;
                 var links = extractLinks(page.html.slice(ep.end, end), page.group.url).filter(function (url) {
-                    return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url) || isVDrive(url);
+                    return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url) || isFastDl(url) || isVDrive(url);
                 });
                 add(page.group, ep.first, ep.last, links);
             });
@@ -586,7 +586,8 @@
 
         return (
             /^https?:\/\/[^\s]+\.(?:mp4|m3u8|mkv)(?:[?#].*)?$/i.test(url) ||
-            /^https:\/\/pub-[a-f0-9]{32}\.r2\.dev\//i.test(url)
+            /^https:\/\/pub-[a-f0-9]{32}\.r2\.dev\//i.test(url) ||
+            /^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com\//i.test(url)
         );
     }
 
@@ -625,8 +626,21 @@
             .filter(Boolean);
     }
 
+    function isFastDl(url) {
+        return /^https:\/\/(?:www\.)?fastdl\.beer\/(?:embed\?download=[A-Za-z0-9_-]+|dl\.php\?link=https(?:%3A|:))/i.test(url || '');
+    }
+
+    function fastDlRedirect(html) {
+        var match = String(html || '').match(
+            /\bvar\s+reurl\s*=\s*["'](https:\/\/fastdl\.beer\/dl\.php\?link=[^"']+)["']/i
+        );
+
+        return match ? decode(match[1]).trim() : '';
+    }
+
     function nextHost(url) {
         if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
+        if (isFastDl(url)) return true;
         // Ignore NexDrive navigation/category pages, which contain unrelated files.
         return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
     }
@@ -841,6 +855,13 @@
                     }
                 }
 
+                // FastDL embeds use a JavaScript redirect rather than an anchor.
+                // Read the constrained reurl assignment; never execute page scripts.
+                if (isFastDl(page)) {
+                    var fastDlPage = fastDlRedirect(html);
+                    if (fastDlPage) links.push(fastDlPage);
+                }
+
                 links.forEach(function (link) {
                     if (mediaUrl(link) && !seenStreams[link]) {
                         seenStreams[link] = true;
@@ -848,7 +869,7 @@
                         found.push(
                             new StreamResult({
                                 url: link,
-                                source: 'V-Cloud / Direct (' + quality + ')',
+                                source: (isFastDl(page) ? 'G-Direct' : 'V-Cloud / Direct') + ' (' + quality + ')',
                                 quality: quality,
                                 headers: { Referer: page }
                             })
