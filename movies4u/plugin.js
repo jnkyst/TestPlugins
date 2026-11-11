@@ -12,7 +12,7 @@
 *  - Search uses the new /lookup.php endpoint (the old /ts-search.php
 *    returns 404) and its flat hits[] shape.
 *  - Series episodes and streams follow the site's current chain:
-*    post page -> m4ulinks.sbs -> hubcloud.pw / gdflix.vip -> direct
+*    post page -> m4ulinks.* -> hubcloud.pw / gdflix.vip -> direct
 *    R2 links. The legacy nexdrive/vcloud/fastdl/vegadrive handling is
 *    kept for older posts.
 */
@@ -539,7 +539,7 @@ var titleTag = (html.match(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/i) || [])[0] || '';
 var fallbackSeasonMatch = text(titleTag).match(/\bseason\s*(\d+)\b|\bs0*(\d+)/i);
 var fallbackSeason = fallbackSeasonMatch ? Number(fallbackSeasonMatch[1] || fallbackSeasonMatch[2]) : 1;
 
-// 1. Find the download groups on the post page: one m4ulinks.sbs
+// 1. Find the download groups on the post page: one m4ulinks.*
 //    link page per quality (legacy posts used nexdrive.beer).
 var heads = headings(html);
 var groups = [];
@@ -554,7 +554,7 @@ var section = html.slice(h.end, i + 1 < heads.length ? heads[i + 1].start : html
 
 anchorsIn(section).forEach(function (a) {
 var link = anchorHref(a, seriesUrl);
-var isNewHost = /^https:\/\/m4ulinks\.sbs\/number\/\d+/i.test(link);
+var isNewHost = /^https:\/\/m4ulinks\.[a-z]+\/number\/\d+/i.test(link);
 var isLegacyHost = /^https:\/\/(?:www\.)?nexdrive\.beer\//i.test(link);
 
 if (!isNewHost && !isLegacyHost) return;
@@ -844,7 +844,7 @@ return match ? decode(match[1]).trim() : '';
 function nextHost(url) {
 if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
 if (isFastDl(url)) return true;
-if (/^https:\/\/m4ulinks\.sbs\/number\/\d+/i.test(url)) return true;
+if (/^https:\/\/m4ulinks\.[a-z]+\/number\/\d+/i.test(url)) return true;
 if (/^https:\/\/m4uplay\.quest\/file\//i.test(url)) return true;
 if (/^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url)) return true;
 if (/^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url)) return true;
