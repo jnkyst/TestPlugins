@@ -947,8 +947,24 @@ function isHubCloud(url) {
 return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(url || '');
 }
 
+// Combined episode packs (e.g. "Episodes: 13-17") are uploaded as
+// ZIP archives. No video player can stream a ZIP, so detect them
+// from the original filename shown in the page <title> and report
+// them clearly instead of returning unplayable streams.
+function isArchiveFile(html) {
+var titleTag =
+(html.match(/<title\b[^>]*>[\s\S]*?<\/title>/i) || [])[0] || '';
+
+return /\.(zip|rar|7z)$/i.test(text(titleTag));
+}
+
 async function resolveHubCloud(shareUrl) {
 var html = await get(shareUrl);
+
+if (isArchiveFile(html)) {
+throw new Error('Archive pack (ZIP) cannot be streamed');
+}
+
 var urls = [];
 
 function collect(source) {
@@ -999,6 +1015,11 @@ return /^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\/[A-Za-z0-9_-]+\/?(?:\?.*)
 
 async function resolveGdflix(shareUrl) {
 var html = await get(shareUrl);
+
+if (isArchiveFile(html)) {
+throw new Error('Archive pack (ZIP) cannot be streamed');
+}
+
 var urls = [];
 var re = /https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8|mkv)(?:\?[^\s"'<>]*)?/gi;
 var m;
@@ -1060,6 +1081,7 @@ var seenPages = {};
 var seenStreams = {};
 var found = [];
 var failures = 0;
+var archiveOnly = false;
 var vdriveCandidates = [];
 var gdflixCandidates = [];
 
@@ -1112,8 +1134,12 @@ hubUrls.forEach(function (u) {
 addStream(u, 'HubCloud (' + quality + ')', quality);
 });
 } catch (error) {
+if (/Archive pack/i.test(String(error))) {
+archiveOnly = true;
+} else {
 failures++;
 console.error('HubCloud resolve failed: ' + String(error));
+}
 }
 return;
 }
@@ -1125,8 +1151,12 @@ gdUrls.forEach(function (u) {
 addStream(u, 'GDFlix (' + quality + ')', quality);
 });
 } catch (error) {
+if (/Archive pack/i.test(String(error))) {
+archiveOnly = true;
+} else {
 // GDFlix usually needs a browser; HubCloud is the primary host.
 console.error('GDFlix resolve skipped: ' + String(error));
+}
 }
 return;
 }
@@ -1269,7 +1299,11 @@ var label = String(gdFallback[g].quality || 'Auto');
 addStream(u, 'GDFlix (' + label + ')', label);
 });
 } catch (error) {
+if (/Archive pack/i.test(String(error))) {
+archiveOnly = true;
+} else {
 console.error('GDFlix fallback failed: ' + String(error));
+}
 }
 }
 }
@@ -1288,6 +1322,18 @@ failures++;
 console.error('V-Drive fallback failed: ' + String(error));
 }
 }
+}
+
+if (!found.length && archiveOnly) {
+return callback({
+success: false,
+errorCode: 'UNKNOWN_ERROR',
+message:
+'These episodes are uploaded as a ZIP pack (multiple ' +
+'episodes in one archive file), which cannot be streamed ' +
+'in the app. Please download the ZIP from the website ' +
+'to watch these episodes.'
+});
 }
 
 if (!found.length && failures) {
