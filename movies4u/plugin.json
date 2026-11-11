@@ -1,31 +1,23 @@
 {
   "packageName": "com.jnkyst.repo.movies4u",
   "name": "Movies4u",
-  "version": 1,
-  "baseUrl": "https://new6.movies4u.garden/",
-  "domains": [
-    {
-      "name": "new1.movies4u.garden (primary)",
-      "url": "https://new6.movies4u.garden/"
-    }
-  ],
-  "description": "Bollywood, Hollywood, Hindi dubbed & South movies, web series, TV shows and K-dramas from Movies4u — multi-audio player plus HubCloud/GDFlix files",
-  "authors": [
-    "Jnkyst"
-  ],
-  "languages": [
-    "hi",
-    "en",
-    "ta",
-    "te",
-    "ml",
-    "kn",
-    "pa",
-    "ko"
-  ],
-  "categories": [
-    "Movies",
-    "Series"
-  ],
-  "isAdult": false
+ "version": 2,
+"description": "Provider for Movies4u - Latest Release, TV Shows, Web Series and Hollywood Movies",
+"domains": [
+"https://new6.movies4u.garden/",
+"https://movies4u.foo/"
+],
+"author": "Jnkyst",
+"baseUrl": "https://new6.movies4u.garden/",
+"authors": [
+"Deepak"
+],
+"languages": [
+"hi",
+"en"
+],
+"categories": [
+"Movies",
+"Series"
+]
 }
