@@ -829,6 +829,7 @@ if (/^https:\/\/m4ulinks\.sbs\/number\/\d+/i.test(url)) return true;
 if (/^https:\/\/m4uplay\.quest\/file\//i.test(url)) return true;
 if (/^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url)) return true;
 if (/^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url)) return true;
+if (/^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:\?.*)?$/i.test(url)) return true;
 // Ignore NexDrive navigation/category pages, which contain unrelated files.
 return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
 }
@@ -958,6 +959,41 @@ var titleTag =
 return /\.(zip|rar|7z)$/i.test(text(titleTag));
 }
 
+// PixelDrain (PixelServer) file pages. HubCloud mirrors some files
+// there; validate each mirror via the metadata API before offering
+// it as a stream. Priority: HubCloud first, PixelServer second.
+function isPixelDrain(url) {
+return /^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:\?.*)?$/i.test(url || '');
+}
+
+async function resolvePixelDrain(shareUrl) {
+var match = String(shareUrl).match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/i);
+if (!match) throw new Error('Unsupported PixelDrain URL');
+var id = match[1];
+
+var response = await http_get(
+'https://pixeldrain.dev/api/file/' + id + '/info',
+{ 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+);
+
+if (!response || response.status < 200 || response.status >= 300) {
+throw new Error('PixelDrain metadata HTTP ' + (response && response.status));
+}
+
+var info = JSON.parse(String(response.body || ''));
+var mime = String((info && info.mime_type) || '');
+
+if (/zip|rar|7z/i.test(mime)) {
+throw new Error('Archive pack (ZIP) cannot be streamed');
+}
+
+if (!info || info.success !== true || info.can_download === false || !/^video\//i.test(mime)) {
+throw new Error('PixelDrain file is not a playable video');
+}
+
+return 'https://pixeldrain.dev/api/file/' + id;
+}
+
 async function resolveHubCloud(shareUrl) {
 var html = await get(shareUrl);
 
@@ -966,6 +1002,7 @@ throw new Error('Archive pack (ZIP) cannot be streamed');
 }
 
 var urls = [];
+var pixelIds = [];
 
 function collect(source) {
 var re = /https:\/\/[A-Za-z0-9-]+\.r2\.cloudflarestorage\.com\/[^\s"'<>]+/gi;
@@ -974,15 +1011,17 @@ while ((m = re.exec(source)) !== null) {
 var u = decode(m[0]);
 if (urls.indexOf(u) < 0) urls.push(u);
 }
+var pixelRe = /https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/gi;
+while ((m = pixelRe.exec(source)) !== null) {
+if (pixelIds.indexOf(m[1]) < 0) pixelIds.push(m[1]);
+}
 }
 
 collect(html);
 
-if (!urls.length) {
 var match = html.match(/https:\/\/gamerxyt\.com\/hubcloud\.php\?[^\s"'<>]+/i);
 if (match) {
 collect(await get(decode(match[0])));
-}
 }
 
 if (!urls.length) {
@@ -996,6 +1035,16 @@ if (/^https:\/\//i.test(decoded)) urls.push(decoded);
 } catch (error) {
 console.error('Could not decode HubCloud player URL: ' + String(error));
 }
+}
+}
+
+// PixelDrain mirrors are second priority: validate each one via
+// the metadata API and append its direct URL after HubCloud's.
+for (var i = 0; i < pixelIds.length; i++) {
+try {
+urls.push(await resolvePixelDrain('https://pixeldrain.dev/u/' + pixelIds[i]));
+} catch (error) {
+console.error('PixelDrain mirror skipped: ' + String(error));
 }
 }
 
@@ -1131,7 +1180,13 @@ if (isHubCloud(page)) {
 try {
 var hubUrls = await resolveHubCloud(page);
 hubUrls.forEach(function (u) {
+// PixelDrain mirrors returned by resolveHubCloud are second
+// priority, after the HubCloud direct links.
+if (/^https:\/\/pixeldrain\.dev\/api\/file\//i.test(u)) {
+addStream(u, 'PixelServer (' + quality + ')', quality);
+} else {
 addStream(u, 'HubCloud (' + quality + ')', quality);
+}
 });
 } catch (error) {
 if (/Archive pack/i.test(String(error))) {
@@ -1139,6 +1194,20 @@ archiveOnly = true;
 } else {
 failures++;
 console.error('HubCloud resolve failed: ' + String(error));
+}
+}
+return;
+}
+
+if (isPixelDrain(page)) {
+try {
+var pixelUrl = await resolvePixelDrain(page);
+addStream(pixelUrl, 'PixelServer (' + quality + ')', quality);
+} catch (error) {
+if (/Archive pack/i.test(String(error))) {
+archiveOnly = true;
+} else {
+console.error('PixelDrain resolve skipped: ' + String(error));
 }
 }
 return;
