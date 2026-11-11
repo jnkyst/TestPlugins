@@ -21,9 +21,7 @@
 'use strict';
 
 function base() {
-return String(
-manifest.baseUrl || 'https://new6.movies4u.garden/'
-).replace(/\/+$/, '');
+return String(manifest.baseUrl || '').replace(/\/+$/, '');
 }
 
 function decode(value) {
@@ -94,23 +92,36 @@ if (d !== 64 && d >= 0) output += String.fromCharCode(n & 255);
 return output;
 }
 
-function normalizeVegaUrl(url) {
-return String(url || '')
-.replace(
-/^https?:\/\/(?:www\.)?(?:vegamovies\.lease|movies4u\.foo)(?=\/|$)/i,
-base()
-);
+// ── Single-source domain handling ──────────────────────────────
+// Only ONE place controls the site origin: manifest.baseUrl in
+// plugin.json.  isSiteUrl() recognises every known Movies4u mirror
+// via a host pattern (any *.movies4u.garden, movies4u.foo, etc.),
+// and normalizeSiteUrl() rewrites any of them to base().
+// Changing baseUrl in plugin.json is therefore sufficient when the
+// domain moves (e.g. new6 -> new7 -> movies4u.foo) - the code
+// fetches from the new origin and old/bookmarked URLs keep resolving.
+function isSiteUrl(url) {
+var host = (String(url || '').match(/^https?:\/\/([^\/:?#]+)/i) || [])[1] || '';
+host = host.toLowerCase().replace(/^www\./i, '');
+if (!host) return false;
+if (/(^|\.)movies4u\.(garden|foo|review)$/i.test(host)) return true;
+return false;
+}
+
+function normalizeSiteUrl(url) {
+if (!isSiteUrl(url)) return String(url || '');
+return String(url).replace(/^https?:\/\/[^\/]+/i, base());
 }
 
 function absolute(url) {
 url = decode(url || '').trim();
 
 if (/^https?:\/\//i.test(url)) {
-return normalizeVegaUrl(url);
+return normalizeSiteUrl(url);
 }
 
 if (url.indexOf('//') === 0) {
-return normalizeVegaUrl('https:' + url);
+return normalizeSiteUrl('https:' + url);
 }
 
 if (url.charAt(0) === '/') {
@@ -156,6 +167,11 @@ return String(url || '').replace(
 }
 
 function isSourcePage(url) {
+// Accept any known Movies4u mirror, not just the current baseUrl, so
+// that search results / bookmarks from any mirror still resolve
+// after the domain moves.
+if (!url) return false;
+if (isSiteUrl(url)) return true;
 return url.indexOf(base() + '/') === 0;
 }
 
@@ -164,7 +180,10 @@ return url.indexOf(base() + '/') === 0;
 function isPostPage(url) {
 if (!isSourcePage(url)) return false;
 
-var path = url.slice(base().length + 1);
+// Normalise first so that any mirror URL is judged against
+// the same path rules as the current site URL.
+var normalized = normalizeSiteUrl(url);
+var path = normalized.slice(base().length + 1);
 
 return !/^(category|page|wp-|search|author|tag|date|feed|comments|privacy|terms|contact|about|dmca|how-to-download)(\/|$)/i.test(path);
 }
@@ -661,7 +680,7 @@ episode: ep.first
 // =====================================
 
 async function load(url, callback) {
-url = normalizeVegaUrl(url);
+url = normalizeSiteUrl(url);
 
 try {
 if (!isSourcePage(url)) {
@@ -1090,7 +1109,7 @@ return urls;
 // =====================================
 
 async function loadStreams(url, callback) {
-url = normalizeVegaUrl(url);
+url = normalizeSiteUrl(url);
 
 try {
 var marker = '#skyepisode=';

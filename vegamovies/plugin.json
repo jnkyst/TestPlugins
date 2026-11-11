@@ -1,15 +1,12 @@
 {
   "packageName": "com.jnkyst.repo.vegamovies",
   "name": "VegaMovies",
-  "version": 3,
+  "version": 4,
   "description": "Provider for VegaMovies (Bollywood, Hollywood & Hindi Dubbed)",
-  "domains": [
-    "https://vegamovies.lease/"
-  ],
   "author": "Jnkyst",
   "baseUrl": "https://vegamovies.lease/",
   "authors": [
-    "Deepak"
+    "Jnkyst"
   ],
   "languages": [
     "hi",

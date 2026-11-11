@@ -6,10 +6,29 @@
 (function () {
     'use strict';
 
+    // plugin.json -> baseUrl is the ONLY domain setting. Do not add a
+    // hardcoded mirror here; SkyStream injects that value as manifest.baseUrl.
     function base() {
-        return String(
-            manifest.baseUrl || 'https://vegamovies.lease/'
-        ).replace(/\/+$/, '');
+        var configured = typeof manifest !== 'undefined'
+            ? String(manifest.baseUrl || '').trim()
+            : '';
+
+        if (!/^https?:\/\/[^/]+/i.test(configured)) {
+            throw new Error('Set a valid baseUrl in plugin.json');
+        }
+
+        return configured.replace(/\/+$/, '');
+    }
+
+    function hostOf(url) {
+        var match = String(url || '').match(/^https?:\/\/([^/]+)/i);
+        return match
+            ? match[1].toLowerCase().replace(/^www\./, '')
+            : '';
+    }
+
+    function baseHost() {
+        return hostOf(base());
     }
 
     function decode(value) {
@@ -50,10 +69,19 @@
     }
 
     function normalizeVegaUrl(url) {
-        return String(url || '').replace(
-            /^https?:\/\/(?:www\.)?vegamovies\.lease(?=\/|$)/i,
-            base()
-        );
+        var value = String(url || '').trim();
+        var host = hostOf(value);
+
+        // Accept saved links from older VegaMovies mirrors and convert them
+        // to the currently configured baseUrl. Other hosts are left intact.
+        if (
+            host === baseHost() ||
+            /^vegamovies\.[a-z0-9.-]+$/i.test(host)
+        ) {
+            return value.replace(/^https?:\/\/[^/]+/i, base());
+        }
+
+        return value;
     }
 
     function absolute(url) {
@@ -80,7 +108,11 @@
         // VegaMovies' og:image is an image-proxy URL. SkyStream's image
         // loader may reject that proxied WebP response. The proxy's `u`
         // parameter contains the original image URL encoded with Base64.
-        if (/^https:\/\/img\.vegamovies\.lease\//i.test(url)) {
+        var imageHost = hostOf(url);
+        if (
+            imageHost === 'img.' + baseHost() ||
+            /^img\.vegamovies\.[a-z0-9.-]+$/i.test(imageHost)
+        ) {
             var match = url.match(/[?&]u=([^&]+)/i);
 
             if (match) {

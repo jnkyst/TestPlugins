@@ -7,9 +7,11 @@
   'use strict';
 
   function base() {
-    return String(
-      manifest.baseUrl || 'https://rogmovies.asia'
-    ).replace(/\/+$/, '');
+    // SkyStream injects the configured (or user-selected) base URL.
+    if (typeof manifest === 'undefined' || !manifest.baseUrl) {
+      throw new Error('Set baseUrl in plugin.json');
+    }
+    return String(manifest.baseUrl).replace(/\/+$/, '');
   }
 
   function decode(value) {
@@ -51,7 +53,7 @@
 
   function normalizeRogUrl(url) {
     return String(url || '').replace(
-      /^https?:\/\/(?:www\.)?rogmovies\.(?:im|asia)(?=\/|$)/i,
+      /^https?:\/\/(?:www\.)?rogmovies\.[a-z0-9.-]+(?::\d+)?(?=[\/?#]|$)/i,
       base()
     );
   }
