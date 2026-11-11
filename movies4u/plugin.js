@@ -604,7 +604,10 @@ var pageHeads = headings(page.html);
 var foundEpisode = false;
 
 pageHeads.forEach(function (h, i) {
-var ep = h.label.match(/episodes?\s*[.:]?\s*(\d+)/i);
+// Headings can cover a range of episodes in one combined file,
+// e.g. "-:Episodes: 13-17:-". Capture both ends so episodes
+// 14-17 are not lost and the file is labelled as combined.
+var ep = h.label.match(/episodes?\s*[.:]?\s*(\d+)(?:\s*(?:[-–—+]|\bto\b)\s*(?:ep(?:isode)?s?\s*)?(\d+))?/i);
 if (!ep) return;
 foundEpisode = true;
 
@@ -616,7 +619,7 @@ return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url) ||
 /^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url);
 });
 
-add(page.group, Number(ep[1]), Number(ep[1]), links);
+add(page.group, Number(ep[1]), ep[2] ? Number(ep[2]) : Number(ep[1]), links);
 });
 
 if (!foundEpisode) {
@@ -1234,6 +1237,12 @@ var validLinks = episodeLinks
 return entry && (nextHost(entry.url) || isVDrive(entry.url));
 })
 .slice(0, 8);
+
+// GDFlix rejects non-browser requests (403), so only use it when
+// the episode has no HubCloud link.
+if (validLinks.some(function (entry) { return isHubCloud(entry.url); })) {
+validLinks = validLinks.filter(function (entry) { return !isGdflix(entry.url); });
+}
 
 validLinks.forEach(function (entry) {
 if (isVDrive(entry.url)) vdriveCandidates.push(entry);
