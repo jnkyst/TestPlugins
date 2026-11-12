@@ -511,7 +511,7 @@
                     // When the site offers a season file without individual episode
                     // headings, keep the season file as one item, not fake episodes.
                     var hasHost = extractLinks(page.html, page.group.url).some(function (link) {
-                        return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isFastDl(link) || isVDrive(link);
+                        return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isFastDl(link) || isFilepress(link) || isVDrive(link);
                     });
                     var pageTitle = text((page.html.match(/<title\b[^>]*>[\s\S]*?<\/title\s*>/i) || [])[0] || '');
                     if (hasHost && /\b(?:season\s*\d+|s0*\d+)\b/i.test(pageTitle)) seasonFiles.push(page.group);
@@ -521,7 +521,7 @@
             episodeHeads.forEach(function (ep, i) {
                 var end = i + 1 < episodeHeads.length ? episodeHeads[i + 1].start : page.html.length;
                 var links = extractLinks(page.html.slice(ep.end, end), page.group.url).filter(function (url) {
-                    return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url) || isFastDl(url) || isVDrive(url);
+                    return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url) || isFastDl(url) || isFilepress(url) || isVDrive(url);
                 });
                 add(page.group, ep.first, ep.last, links);
             });
@@ -535,18 +535,13 @@
         return Object.keys(entries).map(function (key) {
             var ep = entries[key];
             var name = ep.seasonFile ? 'Season ' + ep.season + ' (single file)' : ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
-            var fallbackUrl = seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links));
-            var fastDirect = ep.links.find(function (entry) {
-                return entry && isFastDl(entry.url);
-            });
+            var episodeUrl = seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links));
 
-            // Keep episode URLs short and directly resolvable. Use the encoded
-            // multi-host form only when an episode has no FastDL link.
+            // Always retain every host and quality. Never reduce an episode to
+            // its first FastDL link: doing so discards 1080P/4K alternatives.
             return new Episode({
                 name: name,
-                url: fastDirect
-                    ? fastDirect.url + '&quality=' + encodeURIComponent(fastDirect.quality || 'Auto')
-                    : fallbackUrl,
+                url: episodeUrl,
                 season: ep.season,
                 episode: ep.first
             });
@@ -684,9 +679,134 @@
         return match ? decode(match[1]).trim() : '';
     }
 
+    function isFilepress(url) {
+        return /^https:\/\/(?:filebee\.(?:xyz|live)|(?:new\d+\.)?filepress\.[a-z0-9.-]+)\/file\/[a-f0-9]{24}\/?/i.test(url || '');
+    }
+
+    async function postJson(url, body, referer, extraHeaders) {
+        var headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        };
+
+        if (referer) headers.Referer = referer;
+
+        Object.keys(extraHeaders || {}).forEach(function (key) {
+            headers[key] = extraHeaders[key];
+        });
+
+        var response = await http_post(
+            url,
+            headers,
+            JSON.stringify(body)
+        );
+
+        if (
+            !response ||
+            (response.status && (response.status < 200 || response.status >= 400))
+        ) {
+            throw new Error('POST request failed: ' + (response && response.status));
+        }
+
+        return JSON.parse(String(response.body || ''));
+    }
+
+    async function resolveDotFlix(shareUrl) {
+        var html = await get(shareUrl);
+        var codeMatch = html.match(
+            /var\s+obfuscatedCode\s*=\s*btoa\(\s*["']([^"']+)["']\s*\)/i
+        );
+        var endpointMatch = html.match(
+            /fetch\(\s*["'](https:\/\/[^"']+\/api\/extract-download)["']/i
+        );
+
+        if (!codeMatch || !endpointMatch) {
+            throw new Error('Instant download page format changed');
+        }
+
+        var requestId = Math.random().toString(36).substring(2, 15);
+        var timestamp = Date.now();
+        var obfuscated = btoa(codeMatch[1])
+            .split('')
+            .reverse()
+            .join('');
+        var origin = (shareUrl.match(/^https?:\/\/[^/]+/i) || [])[0];
+
+        var result = await postJson(
+            endpointMatch[1],
+            {
+                requestId: requestId,
+                timestamp: timestamp,
+                data: obfuscated
+            },
+            shareUrl,
+            {
+                'X-Request-ID': requestId,
+                'X-Timestamp': String(timestamp),
+                'Origin': origin
+            }
+        );
+
+        if (
+            !result ||
+            result.success !== true ||
+            !mediaUrl(result.downloadUrl)
+        ) {
+            throw new Error('Instant download did not return a playable URL');
+        }
+
+        return result.downloadUrl;
+    }
+
+    async function resolveFilepress(url) {
+        var idMatch = String(url).match(/\/file\/([a-f0-9]{24})/i);
+        if (!idMatch) throw new Error('Invalid FilePress URL');
+
+        var id = idMatch[1];
+        var origin = (url.match(/^https?:\/\/[^/]+/i) || [])[0];
+        var hosts = ['https://new3.filepress.lat'];
+
+        if (origin && hosts.indexOf(origin) < 0) hosts.push(origin);
+
+        var lastError = null;
+
+        for (var i = 0; i < hosts.length; i++) {
+            try {
+                var result = await postJson(
+                    hosts[i] + '/api/file/downlaod/',
+                    {
+                        id: id,
+                        method: 'dotFlixDownlaod',
+                        captchaValue: null
+                    },
+                    hosts[i] + '/file/' + id
+                );
+
+                if (
+                    result &&
+                    result.status === true &&
+                    /^https:\/\/[^/]+\/share\/[a-f0-9]+/i.test(String(result.data || ''))
+                ) {
+                    return await resolveDotFlix(result.data);
+                }
+
+                throw new Error(
+                    result && result.statusText
+                        ? result.statusText
+                        : 'FilePress instant download unavailable'
+                );
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError || new Error('FilePress instant download failed');
+    }
+
     function nextHost(url) {
         if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
-        if (isFastDl(url)) return true;
+        if (isFastDl(url) || isFilepress(url)) return true;
         // Ignore NexDrive navigation/category pages, which contain unrelated files.
         return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
     }
@@ -852,6 +972,29 @@
 
                 seenPages[page] = true;
 
+                if (isFilepress(page)) {
+                    try {
+                        var filepressVideo = await resolveFilepress(page);
+
+                        if (!seenStreams[filepressVideo]) {
+                            seenStreams[filepressVideo] = true;
+                            found.push(
+                                new StreamResult({
+                                    url: filepressVideo,
+                                    source: 'FilePress / Instant (' + quality + ')',
+                                    quality: quality,
+                                    headers: { Referer: page }
+                                })
+                            );
+                        }
+                    } catch (error) {
+                        failures++;
+                        console.error('FilePress instant download failed: ' + String(error));
+                    }
+
+                    return;
+                }
+
                 var html;
 
                 try {
@@ -984,11 +1127,19 @@
                 validLinks.forEach(function (entry) {
                     if (isVDrive(entry.url)) vdriveCandidates.push(entry);
                 });
-                await Promise.all(
-                    validLinks.filter(function (entry) { return !isVDrive(entry.url); }).map(function (entry) {
-                        return scan(entry.url, 0, String(entry.quality || 'Auto'));
-                    })
-                );
+                var hostLinks = validLinks.filter(function (entry) {
+                    return !isVDrive(entry.url);
+                });
+
+                // Resolve sequentially. Parallel FilePress API requests can
+                // trigger an HTML rate-limit/block response for one quality.
+                for (var hostIndex = 0; hostIndex < hostLinks.length; hostIndex++) {
+                    await scan(
+                        hostLinks[hostIndex].url,
+                        0,
+                        String(hostLinks[hostIndex].quality || 'Auto')
+                    );
+                }
             } else if (isVDrive(url)) {
                 vdriveCandidates.push({ url: url, quality: 'Auto' });
             } else {
