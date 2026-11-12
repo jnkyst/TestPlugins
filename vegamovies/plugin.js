@@ -805,10 +805,34 @@
     }
 
     function nextHost(url) {
+        // Playback priority: only V-Cloud and V-Drive. NexDrive is allowed
+        // solely as an intermediate page used to discover those two hosts.
         if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
-        if (isFastDl(url) || isFilepress(url)) return true;
-        // Ignore NexDrive navigation/category pages, which contain unrelated files.
+        if (isVDrive(url)) return true;
         return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
+    }
+
+    function withTimeout(promise, milliseconds, label) {
+        return new Promise(function (resolve, reject) {
+            var finished = false;
+            var timer = setTimeout(function () {
+                if (finished) return;
+                finished = true;
+                reject(new Error(label || 'Host request timed out'));
+            }, milliseconds);
+
+            promise.then(function (value) {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                resolve(value);
+            }, function (error) {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
     }
 
     function qualityFrom(html, fallback) {
@@ -1122,7 +1146,7 @@
                     .filter(function (entry) {
                         return entry && (nextHost(entry.url) || isVDrive(entry.url));
                     })
-                    .slice(0, 8);
+                    .slice(0, 4);
 
                 validLinks.forEach(function (entry) {
                     if (isVDrive(entry.url)) vdriveCandidates.push(entry);
@@ -1131,38 +1155,58 @@
                     return !isVDrive(entry.url);
                 });
 
-                // Resolve sequentially. Parallel FilePress API requests can
-                // trigger an HTML rate-limit/block response for one quality.
-                for (var hostIndex = 0; hostIndex < hostLinks.length; hostIndex++) {
-                    await scan(
-                        hostLinks[hostIndex].url,
-                        0,
-                        String(hostLinks[hostIndex].quality || 'Auto')
-                    );
-                }
+                // V-Cloud qualities are independent, so resolve them together.
+                // A failed or slow host must not discard streams from others.
+                await Promise.all(hostLinks.map(function (entry) {
+                    return withTimeout(
+                        scan(entry.url, 0, String(entry.quality || 'Auto')),
+                        8000,
+                        'V-Cloud request timed out'
+                    ).catch(function (error) {
+                        failures++;
+                        console.error('V-Cloud resolution failed: ' + String(error));
+                    });
+                }));
             } else if (isVDrive(url)) {
                 vdriveCandidates.push({ url: url, quality: 'Auto' });
             } else {
-                await scan(url, 0, initialQuality);
+                await withTimeout(
+                    scan(url, 0, initialQuality),
+                    8000,
+                    'Host request timed out'
+                ).catch(function (error) {
+                    failures++;
+                    console.error('Host resolution failed: ' + String(error));
+                });
             }
 
             // Offer V-Drive after V-Cloud as a playback backup. Playback failures occur
             // in the player after this function returns and cannot be detected here.
             if (vdriveCandidates.length) {
-                var fallback = vdriveCandidates.slice(0, 8);
-                for (var j = 0; j < fallback.length; j++) {
+                var fallback = vdriveCandidates.slice(0, 4);
+
+                await Promise.all(fallback.map(async function (entry) {
                     try {
-                        var video = await resolveVDrive(fallback[j].url);
+                        var video = await withTimeout(
+                            resolveVDrive(entry.url),
+                            10000,
+                            'V-Drive request timed out'
+                        );
+
                         if (!seenStreams[video]) {
                             seenStreams[video] = true;
-                            var label = String(fallback[j].quality || 'Auto');
-                            found.push(new StreamResult({ url: video, source: 'V-Drive (' + label + ')', quality: label }));
+                            var label = String(entry.quality || 'Auto');
+                            found.push(new StreamResult({
+                                url: video,
+                                source: 'V-Drive (' + label + ')',
+                                quality: label
+                            }));
                         }
                     } catch (error) {
                         failures++;
                         console.error('V-Drive fallback failed: ' + String(error));
                     }
-                }
+                }));
             }
 
             if (!found.length && failures) {
