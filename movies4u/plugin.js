@@ -1350,17 +1350,26 @@ var initialQuality = initialQualityMatch
 : 'Auto';
 
 if (episodeLinks) {
-var validLinks = episodeLinks
-.filter(function (entry) {
+var validLinks = episodeLinks.filter(function (entry) {
 return entry && (nextHost(entry.url) || isVDrive(entry.url));
-})
-.slice(0, 8);
+});
 
-// GDFlix rejects non-browser requests (403), so only use it when
-// the episode has no HubCloud link.
+// Remove secondary mirrors before limiting, so they do not crowd out
+// different qualities. Reserve one slot per quality before filling the rest.
 if (validLinks.some(function (entry) { return isHubCloud(entry.url); })) {
 validLinks = validLinks.filter(function (entry) { return !isGdflix(entry.url); });
 }
+var qualityFirst = [], remaining = [], seenQuality = {};
+validLinks.forEach(function (entry) {
+var key = String(entry.quality || 'Auto').toUpperCase();
+if (!seenQuality[key]) {
+seenQuality[key] = true;
+qualityFirst.push(entry);
+} else {
+remaining.push(entry);
+}
+});
+validLinks = qualityFirst.concat(remaining).slice(0, 8);
 
 validLinks.forEach(function (entry) {
 if (isVDrive(entry.url)) vdriveCandidates.push(entry);
