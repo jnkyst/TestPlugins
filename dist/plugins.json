@@ -140,28 +140,19 @@
     "packageName": "com.jnkyst.repo.moviesdrive",
     "name": "MoviesDrive",
     "version": 1,
-    "baseUrl": "https://new2.moviesdrives.my",
-    "domains": [
-      {
-        "name": "new2.moviesdrives.my",
-        "url": "https://new2.moviesdrives.my"
-      },
-      {
-        "name": "moviesdrive.forum",
-        "url": "https://moviesdrive.forum"
-      }
-    ],
-    "description": "Premium VOD Scraper with metadata sync",
+    "description": "Provider for MoviesDrives - Latest Release, TV Shows, Web Series and Hollywood Movies",
+    "author": "Jnkyst",
+    "baseUrl": "https://new3.moviesdrive.cyou/",
     "authors": [
-      "Jnkyst"
+      "Deepak"
     ],
     "languages": [
-      "en",
-      "hi"
+      "hi",
+      "en"
     ],
     "categories": [
-      "Movie",
-      "TvSeries"
+      "Movies",
+      "Series"
     ],
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.moviesdrive.sky"
   },
