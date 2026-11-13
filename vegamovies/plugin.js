@@ -809,6 +809,9 @@
         // solely as an intermediate page used to discover those two hosts.
         if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
         if (isVDrive(url)) return true;
+        // FastDL's dl.php page is a redirect hop for the last-resort G-Direct
+        // path; it is never selected as an initial candidate.
+        if (isFastDl(url)) return true;
         return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
     }
 
@@ -920,25 +923,44 @@
         var intermediate = root + '/d/' + id + '/skydrop';
         await request(share);
         await request(intermediate, share);
-        var prepare = root + '/__vega_bridge/prepare/' + id + '?provider=skydrop';
+
+        // Vega Drive exposes the prepared link through download-link. It may
+        // answer 202 {"ready":false,"retry_after_ms":N} while preparing.
         var fetchLink = root + '/download-link/' + id + '/skydrop';
-        var data;
-        for (var attempt = 0; attempt < 3; attempt++) {
-            data = JSON.parse(await request(prepare, intermediate, 'application/json'));
-            if (data.ready === true) {
-                if (typeof data.download_url !== 'string') {
+
+        for (var attempt = 0; attempt < 4; attempt++) {
+            var data;
+
+            try {
+                data = JSON.parse(await request(fetchLink, intermediate, 'application/json'));
+            } catch (error) {
+                if (/HTTP 40[13]/.test(String(error))) {
+                    try {
+                        await request(root + '/__vega_bridge/prepare/' + id + '?provider=skydrop', intermediate, 'application/json');
+                    } catch (ignored) { }
                     data = JSON.parse(await request(fetchLink, intermediate, 'application/json'));
-                }
-                if (data.ready === true && typeof data.download_url === 'string') {
-                    // Only accept Google-hosted HTTPS URLs, as Vega Drive's page does.
-                    if (!/^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com(?::443)?\//i.test(data.download_url)) {
-                        throw new Error('Unexpected V-Drive download host');
-                    }
-                    return data.download_url;
+                } else {
+                    throw error;
                 }
             }
-            if (attempt < 2) await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+
+            if (data && data.ready === true && typeof data.download_url === 'string') {
+                // Accept Google's download/content hosts, which Vega Drive serves.
+                if (!/^https:\/\/(?:[A-Za-z0-9-]+\.)*(?:googleusercontent|googlevideo)\.com(?::443)?\//i.test(data.download_url)) {
+                    throw new Error('Unexpected V-Drive download host');
+                }
+
+                return data.download_url;
+            }
+
+            if (attempt < 3) {
+                var wait = Number(data && data.retry_after_ms) || 1200;
+                await new Promise(function (resolve) {
+                    setTimeout(resolve, Math.min(wait, 3000));
+                });
+            }
         }
+
         throw new Error('V-Drive link not ready');
     }
 
@@ -1136,60 +1158,20 @@
                 }
             }
 
-            var initialQualityMatch = url.match(/[?&]quality=([^&]+)/i);
-            var initialQuality = initialQualityMatch
-                ? decodeURIComponent(initialQualityMatch[1])
-                : 'Auto';
+            // Resolve V-Drive shares in parallel; each prepares a short-lived
+            // Google URL. Failures never discard streams from other hosts.
+            var vdriveHandled = false;
+            var filepressCandidates = [];
+            var fastDlCandidates = [];
 
-            if (episodeLinks) {
-                var validLinks = episodeLinks
-                    .filter(function (entry) {
-                        return entry && (nextHost(entry.url) || isVDrive(entry.url));
-                    })
-                    .slice(0, 4);
+            async function addVDriveStreams(entries) {
+                if (!entries || !entries.length) return;
 
-                validLinks.forEach(function (entry) {
-                    if (isVDrive(entry.url)) vdriveCandidates.push(entry);
-                });
-                var hostLinks = validLinks.filter(function (entry) {
-                    return !isVDrive(entry.url);
-                });
-
-                // V-Cloud qualities are independent, so resolve them together.
-                // A failed or slow host must not discard streams from others.
-                await Promise.all(hostLinks.map(function (entry) {
-                    return withTimeout(
-                        scan(entry.url, 0, String(entry.quality || 'Auto')),
-                        8000,
-                        'V-Cloud request timed out'
-                    ).catch(function (error) {
-                        failures++;
-                        console.error('V-Cloud resolution failed: ' + String(error));
-                    });
-                }));
-            } else if (isVDrive(url)) {
-                vdriveCandidates.push({ url: url, quality: 'Auto' });
-            } else {
-                await withTimeout(
-                    scan(url, 0, initialQuality),
-                    8000,
-                    'Host request timed out'
-                ).catch(function (error) {
-                    failures++;
-                    console.error('Host resolution failed: ' + String(error));
-                });
-            }
-
-            // Offer V-Drive after V-Cloud as a playback backup. Playback failures occur
-            // in the player after this function returns and cannot be detected here.
-            if (vdriveCandidates.length) {
-                var fallback = vdriveCandidates.slice(0, 4);
-
-                await Promise.all(fallback.map(async function (entry) {
+                await Promise.all(entries.map(async function (entry) {
                     try {
                         var video = await withTimeout(
                             resolveVDrive(entry.url),
-                            10000,
+                            9000,
                             'V-Drive request timed out'
                         );
 
@@ -1204,7 +1186,210 @@
                         }
                     } catch (error) {
                         failures++;
-                        console.error('V-Drive fallback failed: ' + String(error));
+                        console.error('V-Drive resolution failed: ' + String(error));
+                    }
+                }));
+            }
+
+            var initialQualityMatch = url.match(/[?&]quality=([^&]+)/i);
+            var initialQuality = initialQualityMatch
+                ? decodeURIComponent(initialQualityMatch[1])
+                : 'Auto';
+
+            if (episodeLinks) {
+                // Keep up to three links per quality so a lower quality listed
+                // first can never push the 1080P/4K alternatives out.
+                var validLinks = [];
+                var seenCandidates = {};
+
+                episodeLinks.forEach(function (entry) {
+                    if (!entry || !entry.url) return;
+                    if (isFilepress(entry.url)) {
+                        // Kept aside only; used if both priority clouds fail.
+                        filepressCandidates.push(entry);
+                        return;
+                    }
+                    if (isFastDl(entry.url)) {
+                        // G-Direct is a last resort only, never a first choice.
+                        fastDlCandidates.push(entry);
+                        return;
+                    }
+                    if (!nextHost(entry.url) && !isVDrive(entry.url)) return;
+                    if (seenCandidates[entry.url]) return;
+
+                    var entryQuality = String(entry.quality || 'Auto');
+                    var sameQuality = validLinks.filter(function (item) {
+                        return item.quality === entryQuality;
+                    }).length;
+
+                    if (sameQuality >= 3) return;
+
+                    seenCandidates[entry.url] = true;
+                    validLinks.push({ url: entry.url, quality: entryQuality });
+                });
+
+                validLinks.forEach(function (entry) {
+                    if (isVDrive(entry.url)) vdriveCandidates.push(entry);
+                });
+
+                var hostLinks = validLinks.filter(function (entry) {
+                    return !isVDrive(entry.url);
+                });
+
+                // Start V-Drive immediately so it prepares its link while the
+                // V-Cloud pages are still being fetched.
+                var vdriveEarly = addVDriveStreams(vdriveCandidates.slice(0, 4));
+
+                // Start the highest-quality FilePress link now, in parallel with
+                // the priority hosts, but merge it only if that quality is still
+                // missing. This removes the serial wait for 1080P.
+                var fillEntries = [];
+                filepressCandidates.slice().sort(function (a, b) {
+                    return qualityRank({ source: String(b.quality || '') }) -
+                        qualityRank({ source: String(a.quality || '') });
+                }).forEach(function (entry) {
+                    var label = String(entry.quality || 'Auto');
+
+                    if (fillEntries.length < 2 &&
+                        !fillEntries.some(function (item) { return item.quality === label; })) {
+                        fillEntries.push(entry);
+                    }
+                });
+
+                // FilePress rejects simultaneous requests, so start each one
+                // shortly after the previous instead of blocking on it.
+                var earlyFill = fillEntries.length
+                    ? Promise.all(fillEntries.map(function (entry, index) {
+                        return new Promise(function (resolve) {
+                            setTimeout(resolve, index * 900);
+                        }).then(function () {
+                            return withTimeout(
+                                resolveFilepress(entry.url),
+                                9000,
+                                'FilePress request timed out'
+                            ).then(function (video) {
+                                return { url: video, quality: String(entry.quality || 'Auto'), referer: entry.url };
+                            });
+                        }).catch(function (error) {
+                            console.error('FilePress pre-fetch failed: ' + String(error));
+                            return null;
+                        });
+                    }))
+                    : Promise.resolve([]);
+
+                // V-Cloud qualities are independent, so resolve them together.
+                // A failed or slow host must not discard streams from others.
+                await Promise.all(hostLinks.map(function (entry) {
+                    return withTimeout(
+                        scan(entry.url, 0, String(entry.quality || 'Auto')),
+                        8000,
+                        'V-Cloud request timed out'
+                    ).catch(function (error) {
+                        failures++;
+                        console.error('V-Cloud resolution failed: ' + String(error));
+                    });
+                }));
+
+                await vdriveEarly;
+                vdriveHandled = true;
+
+                var filled = await earlyFill;
+                var covered = {};
+                found.forEach(function (stream) {
+                    covered[String(stream.quality || '')] = true;
+                });
+
+                filled.forEach(function (item) {
+                    if (!item || !item.url || covered[item.quality] || seenStreams[item.url]) return;
+                    seenStreams[item.url] = true;
+                    covered[item.quality] = true;
+                    found.push(new StreamResult({
+                        url: item.url,
+                        source: 'FilePress / Instant (' + item.quality + ')',
+                        quality: item.quality,
+                        headers: { Referer: item.referer }
+                    }));
+                });
+            } else if (isVDrive(url)) {
+                vdriveCandidates.push({ url: url, quality: 'Auto' });
+            } else {
+                await withTimeout(
+                    scan(url, 0, initialQuality),
+                    8000,
+                    'Host request timed out'
+                ).catch(function (error) {
+                    failures++;
+                    console.error('Host resolution failed: ' + String(error));
+                });
+            }
+
+            // Resolve any remaining V-Drive links (single-file URLs, or links
+            // discovered while scanning V-Cloud pages).
+            if (!vdriveHandled && vdriveCandidates.length) {
+                await addVDriveStreams(vdriveCandidates.slice(0, 4));
+            }
+
+            // FilePress/FileBee is used only to fill a quality that V-Cloud and
+            // V-Drive could not supply (for example when 1080P is Cloudflare
+            // blocked), so it never delays the normal fast path.
+            var missingQualityLinks = [];
+
+            if (filepressCandidates.length) {
+                var coveredQualities = {};
+
+                found.forEach(function (stream) {
+                    coveredQualities[String(stream.quality || '')] = true;
+                });
+
+                filepressCandidates.forEach(function (entry) {
+                    var label = String(entry.quality || 'Auto');
+
+                    if (!coveredQualities[label] && missingQualityLinks.length < 2 &&
+                        !missingQualityLinks.some(function (item) { return item.url === entry.url; })) {
+                        missingQualityLinks.push(entry);
+                    }
+                });
+            }
+
+            if (missingQualityLinks.length) {
+                await Promise.all(missingQualityLinks.map(async function (entry) {
+                    try {
+                        var video = await withTimeout(
+                            resolveFilepress(entry.url),
+                            12000,
+                            'FilePress request timed out'
+                        );
+
+                        if (!seenStreams[video]) {
+                            seenStreams[video] = true;
+                            var label = String(entry.quality || 'Auto');
+                            found.push(new StreamResult({
+                                url: video,
+                                source: 'FilePress / Instant (' + label + ')',
+                                quality: label,
+                                headers: { Referer: entry.url }
+                            }));
+                        }
+                    } catch (error) {
+                        failures++;
+                        console.error('FilePress resolution failed: ' + String(error));
+                    }
+                }));
+            }
+
+            // G-Direct (FastDL) is followed only when neither priority cloud
+            // produced anything, so it cannot slow down or outrank them.
+            if (!found.length && fastDlCandidates.length) {
+                await Promise.all(fastDlCandidates.slice(0, 8).map(async function (entry) {
+                    try {
+                        await withTimeout(
+                            scan(entry.url, 0, String(entry.quality || 'Auto')),
+                            8000,
+                            'G-Direct request timed out'
+                        );
+                    } catch (error) {
+                        failures++;
+                        console.error('G-Direct fallback failed: ' + String(error));
                     }
                 }));
             }
