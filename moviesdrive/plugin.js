@@ -126,8 +126,12 @@ function isSiteUrl(url) {
 var host = (String(url || '').match(/^https?:\/\/([^\/:?#]+)/i) || [])[1] || '';
 host = host.toLowerCase().replace(/^www\./i, '');
 if (!host) return false;
-if (/(^|\.)moviesdrive\.(cyou|garden|foo|review|movies|xyz|site|top|club|live)$/i.test(host)) return true;
-if (/(^|\.)movies4u\.(garden|foo|review)$/i.test(host)) return true;
+// Every MoviesDrive mirror, whatever TLD the project moves to next:
+// moviesdrive.cyou, moviesdrive.garden, moviesdrives.mov, ... The
+// download hosts (mdrive.lol, hubcloud.pw, gdflix.vip, pixeldrain)
+// deliberately do NOT match, otherwise normalizeSiteUrl() would
+// rewrite them back to baseUrl and break playback.
+if (/(^|\.)moviesdrives?\.[a-z]{2,12}$/i.test(host)) return true;
 return false;
 }
 
