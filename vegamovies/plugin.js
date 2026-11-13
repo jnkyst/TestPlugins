@@ -120,7 +120,7 @@
                     var encoded = decodeURIComponent(match[1])
                         .replace(/-/g, '+')
                         .replace(/_/g, '/');
-                    var original = atob(encoded);
+                    var original = base64Decode(encoded);
 
                     if (/^https:\/\/image\.tmdb\.org\/t\/p\/[a-z0-9]+\/[A-Za-z0-9]+\.(?:jpe?g|png|webp)$/i.test(original)) {
                         return original;
@@ -141,12 +141,72 @@
         );
     }
 
+    // =====================================
+    // HTTP BRIDGE
+    // =====================================
+    // SkyStream exposes http_get/http_post with an optional callback. Some
+    // builds return a promise, others only invoke the callback, so support
+    // both instead of assuming a return value.
+
+    function bridgeRequest(method, url, headers, body) {
+        return new Promise(function (resolve, reject) {
+            var settled = false;
+            var finished = false;
+
+            var timer = setTimeout(function () {
+                if (!finished) fail(new Error('Request timed out: ' + url));
+            }, 15000);
+
+            function done(response) {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                resolve(response);
+            }
+
+            function fail(error) {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                reject(error);
+            }
+
+            try {
+                var maybe = method === 'post'
+                    ? http_post(url, headers, body, done)
+                    : http_get(url, headers, done);
+
+                if (maybe && typeof maybe.then === 'function') {
+                    maybe.then(function (response) {
+                        if (response) done(response);
+                    }, function (error) {
+                        if (settled) return;
+                        settled = true;
+                        fail(error);
+                    });
+                } else if (maybe) {
+                    done(maybe);
+                }
+            } catch (error) {
+                fail(error);
+            }
+        });
+    }
+
+    async function safeGet(url, headers) {
+        return bridgeRequest('get', url, headers || {}, null);
+    }
+
+    async function safePost(url, headers, body) {
+        return bridgeRequest('post', url, headers || {}, body);
+    }
+
     function isSourcePage(url) {
         return url.indexOf(base() + '/') === 0;
     }
 
     async function get(url) {
-        var response = await http_get(url, {
+        var response = await safeGet(url, {
             'User-Agent': 'Mozilla/5.0',
             'Accept': 'text/html,application/xhtml+xml'
         });
@@ -165,6 +225,62 @@
         }
 
         return String(response.body || '');
+    }
+
+    // =====================================
+    // BASE64 (no host dependency)
+    // =====================================
+    // The app runs on JavaScriptCore, which may not expose btoa/atob.
+    // These local implementations keep every host working there too.
+
+    var B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+    function base64Encode(value) {
+        var input = String(value || '');
+        var output = '';
+        var index;
+
+        for (index = 0; index < input.length; index += 3) {
+            var first = input.charCodeAt(index);
+            var second = index + 1 < input.length ? input.charCodeAt(index + 1) : NaN;
+            var third = index + 2 < input.length ? input.charCodeAt(index + 2) : NaN;
+
+            var block = (first << 16) |
+                ((isNaN(second) ? 0 : second) << 8) |
+                (isNaN(third) ? 0 : third);
+
+            output += B64_CHARS.charAt((block >> 18) & 63);
+            output += B64_CHARS.charAt((block >> 12) & 63);
+            output += isNaN(second) ? '=' : B64_CHARS.charAt((block >> 6) & 63);
+            output += isNaN(third) ? '=' : B64_CHARS.charAt(block & 63);
+        }
+
+        return output;
+    }
+
+    function base64Decode(value) {
+        var input = String(value || '').replace(/[^A-Za-z0-9+/=]/g, '');
+        var output = '';
+
+        for (var index = 0; index < input.length; index += 4) {
+            var a = B64_CHARS.indexOf(input.charAt(index));
+            var b = B64_CHARS.indexOf(input.charAt(index + 1));
+            var c = B64_CHARS.indexOf(input.charAt(index + 2));
+            var d = B64_CHARS.indexOf(input.charAt(index + 3));
+
+            if (a < 0 || b < 0) return output;
+
+            var block = (a << 18) | (b << 12) |
+                ((c < 0 ? 0 : c) << 6) |
+                (d < 0 ? 0 : d);
+
+            output += String.fromCharCode((block >> 16) & 255);
+
+            if (c >= 0) output += String.fromCharCode((block >> 8) & 255);
+            if (d >= 0) output += String.fromCharCode(block & 255);
+        }
+
+        return output;
     }
 
     function cleanTitle(value) {
@@ -696,7 +812,7 @@
             headers[key] = extraHeaders[key];
         });
 
-        var response = await http_post(
+        var response = await safePost(
             url,
             headers,
             JSON.stringify(body)
@@ -727,7 +843,7 @@
 
         var requestId = Math.random().toString(36).substring(2, 15);
         var timestamp = Date.now();
-        var obfuscated = btoa(codeMatch[1])
+        var obfuscated = base64Encode(codeMatch[1])
             .split('')
             .reverse()
             .join('');
@@ -859,7 +975,7 @@
         if (!match) return '';
 
         try {
-            var decodedUrl = atob(atob(match[1]));
+            var decodedUrl = base64Decode(base64Decode(match[1]));
 
             var cleanPage = page
                 .split('?')[0]
@@ -902,7 +1018,7 @@
             if (referer) headers.Referer = referer;
             var cookies = Object.keys(jar).map(function (key) { return key + '=' + jar[key]; }).join('; ');
             if (cookies) headers.Cookie = cookies;
-            var response = await http_get(url, headers);
+            var response = await safeGet(url, headers);
             if (!response || (response.status && (response.status < 200 || response.status >= 400))) {
                 throw new Error('V-Drive HTTP ' + (response && response.status));
             }
@@ -921,8 +1037,13 @@
 
         var share = root + '/s/' + id;
         var intermediate = root + '/d/' + id + '/skydrop';
-        await request(share);
-        await request(intermediate, share);
+
+        // Both pages only establish the session and share the same cookie jar,
+        // so fetch them together instead of one after the other.
+        await Promise.all([
+            request(share).catch(function () { return ''; }),
+            request(intermediate, share).catch(function () { return ''; })
+        ]);
 
         // Vega Drive exposes the prepared link through download-link. It may
         // answer 202 {"ready":false,"retry_after_ms":N} while preparing.
@@ -1132,7 +1253,7 @@
                 await Promise.all(pixelCandidates.slice(0, 8).map(async function (id) {
                     try {
                         var infoUrl = 'https://pixeldrain.dev/api/file/' + id + '/info';
-                        var response = await http_get(infoUrl, { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' });
+                        var response = await safeGet(infoUrl, { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' });
                         if (!response || response.status < 200 || response.status >= 300) return;
                         var info = JSON.parse(String(response.body || ''));
                         if (!info || info.success !== true || info.can_download === false ||
@@ -1267,7 +1388,16 @@
                                 resolveFilepress(entry.url),
                                 9000,
                                 'FilePress request timed out'
-                            ).then(function (video) {
+                            ).catch(function (error) {
+                                // One retry: the first call can collide with a
+                                // parallel request and return an HTML block page.
+                                console.error('FilePress retry: ' + String(error));
+                                return withTimeout(
+                                    resolveFilepress(entry.url),
+                                    9000,
+                                    'FilePress retry timed out'
+                                );
+                            }).then(function (video) {
                                 return { url: video, quality: String(entry.quality || 'Auto'), referer: entry.url };
                             });
                         }).catch(function (error) {
