@@ -583,11 +583,12 @@ catch (e) { console.error('Episode list request failed: ' + String(e)); return n
 pages = pages.concat(batch);
 }
 
-function add(group, first, last, links) {
+function add(group, first, last, links, variant) {
 if (!first || !links.length) return;
 last = last || first;
-var key = group.season + ':' + first + ':' + last;
-if (!entries[key]) entries[key] = { season: group.season, first: first, last: last, links: [] };
+variant = variant || '';
+var key = group.season + ':' + first + ':' + last + ':' + variant;
+if (!entries[key]) entries[key] = { season: group.season, first: first, last: last, variant: variant, links: [] };
 links.forEach(function (url) {
 if (!entries[key].links.some(function (e) { return e.url === url; })) entries[key].links.push({ url: url, quality: group.quality });
 });
@@ -638,7 +639,10 @@ return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url) ||
 /^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url);
 });
 
-add(page.group, Number(ep[1]), ep[2] ? Number(ep[2]) : Number(ep[1]), links);
+// Preserve explicitly labelled versions as separate episode entries.
+var suffix = h.label.slice(ep.index + ep[0].length);
+var version = suffix.match(/^\s*[:\-–—]*\s*(YT|NF)\b/i);
+add(page.group, Number(ep[1]), ep[2] ? Number(ep[2]) : Number(ep[1]), links, version ? version[1].toUpperCase() : '');
 });
 
 if (!foundEpisode) {
@@ -650,13 +654,16 @@ var links = anchorsIn(page.html)
 return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url) ||
 /^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url);
 });
-add(page.group, 1, 1, links);
+// Multi-file pages without recognizable episode headings must not be
+// merged into Episode 1: they can contain unrelated bonus clips.
+if (links.length <= 2) add(page.group, 1, 1, links);
 }
 });
 
 return Object.keys(entries).map(function (key) {
 var ep = entries[key];
 var name = ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
+if (ep.variant) name += ' - ' + ep.variant;
 var fallbackUrl = seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links));
 var fastDirect = ep.links.find(function (entry) {
 return entry && isFastDl(entry.url);
