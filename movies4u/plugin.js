@@ -992,7 +992,7 @@ function isPixelDrain(url) {
 return /^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:\?.*)?$/i.test(url || '');
 }
 
-async function resolvePixelDrain(shareUrl) {
+async function resolvePixelDrain(shareUrl, metadata) {
 var match = String(shareUrl).match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/i);
 if (!match) throw new Error('Unsupported PixelDrain URL');
 var id = match[1];
@@ -1017,7 +1017,15 @@ if (!info || info.success !== true || info.can_download === false || !/^video\//
 throw new Error('PixelDrain file is not a playable video');
 }
 
+if (metadata && Number(info.size) > 0) metadata.size = formatFileSize(Number(info.size));
 return 'https://pixeldrain.dev/api/file/' + id;
+}
+
+function formatFileSize(bytes) {
+if (!(bytes > 0)) return '';
+var units = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+return (i ? bytes.toFixed(2).replace(/\.00$/, '') : String(bytes)) + ' ' + units[i];
 }
 
 async function resolveHubCloud(shareUrl) {
@@ -1029,8 +1037,18 @@ throw new Error('Archive pack (ZIP) cannot be streamed');
 
 var urls = [];
 var pixelIds = [];
+var serverNames = {};
+// The share page describes the file represented by its server mirrors.
+var sizeMatch = html.match(/File\s*Size\s*(?:<[^>]+>\s*)*([\d.,]+\s*(?:TB|GB|MB|KB|B))\b/i);
+var fileSize = sizeMatch ? sizeMatch[1].replace(/\s+/g, ' ').toUpperCase() : '';
 
 function collect(source) {
+anchorsIn(source).forEach(function (anchor) {
+var href = anchorHref(anchor, shareUrl);
+var label = text(anchor);
+if (/FSL\s*(?:SERVER\s*)?V\s*2|FSLV2/i.test(label)) serverNames[href] = 'FSL Server V2';
+else if (/FSL\s*SERVER/i.test(label)) serverNames[href] = 'FSL Server';
+});
 var re = /https:\/\/[A-Za-z0-9-]+\.r2\.cloudflarestorage\.com\/[^\s"'<>]+/gi;
 var m;
 while ((m = re.exec(source)) !== null) {
@@ -1078,7 +1096,9 @@ if (!urls.length) {
 throw new Error('HubCloud direct link not found');
 }
 
-return urls;
+return urls.map(function (u) {
+return { url: u, source: /^https:\/\/pixeldrain\.dev\/api\/file\//i.test(u) ? 'Pixel Server' : (serverNames[u] || 'HubCloud'), size: fileSize };
+});
 }
 
 // GDFlix pages do not expose a clean direct URL (their buttons lead
@@ -1205,14 +1225,9 @@ quality = qualityFrom(html, quality);
 if (isHubCloud(page)) {
 try {
 var hubUrls = await resolveHubCloud(page);
-hubUrls.forEach(function (u) {
-// PixelDrain mirrors returned by resolveHubCloud are second
-// priority, after the HubCloud direct links.
-if (/^https:\/\/pixeldrain\.dev\/api\/file\//i.test(u)) {
-addStream(u, 'PixelServer (' + quality + ')', quality);
-} else {
-addStream(u, 'HubCloud (' + quality + ')', quality);
-}
+hubUrls.forEach(function (entry) {
+var label = entry.source + ' (' + quality + (entry.size ? ' · ' + entry.size : '') + ')';
+addStream(entry.url, label, quality);
 });
 } catch (error) {
 if (/Archive pack/i.test(String(error))) {
@@ -1227,8 +1242,9 @@ return;
 
 if (isPixelDrain(page)) {
 try {
-var pixelUrl = await resolvePixelDrain(page);
-addStream(pixelUrl, 'PixelServer (' + quality + ')', quality);
+var pixelMetadata = {};
+var pixelUrl = await resolvePixelDrain(page, pixelMetadata);
+addStream(pixelUrl, 'Pixel Server (' + quality + (pixelMetadata.size ? ' · ' + pixelMetadata.size : '') + ')', quality);
 } catch (error) {
 if (/Archive pack/i.test(String(error))) {
 archiveOnly = true;
@@ -1334,7 +1350,8 @@ var info = JSON.parse(String(response.body || ''));
 if (!info || info.success !== true || info.can_download === false ||
 !/^video\//i.test(String(info.mime_type || ''))) return;
 var pixelVideo = 'https://pixeldrain.dev/api/file/' + id;
-addStream(pixelVideo, 'V-Cloud / PixelServer (' + quality + ')', quality);
+var pixelSize = formatFileSize(Number(info.size));
+addStream(pixelVideo, 'V-Cloud / Pixel Server (' + quality + (pixelSize ? ' · ' + pixelSize : '') + ')', quality);
 } catch (error) {
 console.error('PixelServer metadata check failed: ' + String(error));
 }
@@ -1470,7 +1487,7 @@ return -1;
 if (rankA !== rankB) return rankA - rankB;
 function sourceRank(stream) {
 var label = String(stream.source || '');
-return /^V-Drive\b/i.test(label) ? 2 : /PixelServer/i.test(label) ? 1 : 0;
+return /^V-Drive\b/i.test(label) ? 2 : /Pixel\s*Server/i.test(label) ? 1 : 0;
 }
 return sourceRank(a) - sourceRank(b);
 });
