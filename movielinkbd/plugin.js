@@ -15,14 +15,21 @@
  * leaking into the Latest Release row. The old <article class="post">
  * markup and the #moviesGridMain grid are kept as fallbacks.
  *
- * Search still calls the inherited /lookup.php endpoint; MovieLinkBD
- * currently serves HTML at /search instead, so search needs its own
- * update if you want it working on this site.
+ * Search uses MovieLinkBD's HTML endpoint GET /search?q=...&page=N
+ * (the inherited /lookup.php JSON API 404s on this site) and reuses
+ * the movie-card parser, 30 results per page. "Found 0 Results"
+ * pages return an empty list instead of an error.
  *
  * HTTP is strictly ONE request at a time: when requests are fired in
  * parallel (Promise.all), the SkyStream runtime answers 500 for every
  * request except the first. get() also retries 5xx/429 once after a
  * short wait, so transient rate-limit 500s recover on their own.
+ *
+ * Series episodes and movie downloads sit behind MovieLinkBD's
+ * encrypted data-dl anchors -> /file/<token> server choosers -> final
+ * direct URL (FSL Cloudflare Worker, Range-capable video). The
+ * decoder, the /file/ follow logic and the worker media pattern all
+ * live in this file; ZIP packs are deliberately never offered.
  */
 
 (function () {
@@ -98,6 +105,57 @@ if (d !== 64 && d >= 0) output += String.fromCharCode(n & 255);
 }
 
 return output;
+}
+
+// 32-bit integer multiply (Math.imul) with an ES5 fallback, used by
+// the MovieLinkBD link decoder below.
+function imul32(a, b) {
+if (typeof Math.imul === 'function') return Math.imul(a, b);
+
+var ah = (a >>> 16) & 0xffff;
+var al = a & 0xffff;
+var bh = (b >>> 16) & 0xffff;
+var bl = b & 0xffff;
+
+return ((al * bl) + (((ah * bl + al * bh) << 16) >>> 0)) | 0;
+}
+
+// MovieLinkBD hides every real download target behind an XOR-encoded
+// anchor: <a href="#" data-dl="<base64>" data-ds="<seed hex>"
+// data-dr="<warmup rounds>">Download [720p • 260 MB]</a>. This is a
+// faithful port of the site's own `dec()` from its inline script:
+// seed an LCG with parseInt(data-ds, 16), warm it up data-dr times,
+// then XOR each base64-decoded byte with (state >>> 16) & 0xff after
+// one more LCG step per byte. Returns the decoded path/URL ('' on
+// failure); callers run it through absolute().
+function decodeDataDl(anchorTag) {
+var payload = attr(anchorTag, 'data-dl');
+if (!payload) return '';
+
+var seed = parseInt(attr(anchorTag, 'data-ds') || '', 16) >>> 0;
+var rounds = parseInt(attr(anchorTag, 'data-dr') || '0', 10) || 0;
+
+try {
+var x = seed;
+var i;
+for (i = 0; i < rounds; i++) {
+x = (imul32(x, 1103515245) + 12345) >>> 0;
+}
+
+var raw = safeAtob(payload);
+var out = '';
+var j;
+
+for (j = 0; j < raw.length; j++) {
+x = (imul32(x, 1103515245) + 12345) >>> 0;
+out += String.fromCharCode(raw.charCodeAt(j) ^ ((x >>> 16) & 255));
+}
+
+return out;
+} catch (error) {
+console.error('Could not decode data-dl link: ' + String(error));
+return '';
+}
 }
 
 // ── Single-source domain handling ──────────────────────────────
@@ -197,6 +255,18 @@ var normalized = normalizeSiteUrl(url);
 var path = normalized.slice(base().length + 1);
 
 return !/^(category|page|wp-|search|author|tag|date|feed|comments|privacy|terms|contact|about|dmca|how-to-download|collection|language|genre|type|live)(\/|$)/i.test(path);
+}
+
+// The site's download pipeline lives at /file/<token>: a server
+// chooser page that leads to the next /file/ hop and eventually to a
+// direct file URL. These pages are part of the playable chain.
+function isFilePage(url) {
+if (!isSourcePage(url)) return false;
+
+var normalized = normalizeSiteUrl(url);
+var path = normalized.slice(base().length + 1);
+
+return /^file\//i.test(path);
 }
 
 function delay(ms) {
@@ -346,7 +416,7 @@ throw new Error('Post list not found; the site layout may have changed');
 }
 
 var anchors =
-scope.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+scope.match(/<a(?=[\s>\/])[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
 
 anchors.forEach(function (anchor) {
 var opening =
@@ -413,59 +483,32 @@ return '';
 // =====================================
 
 async function searchItems(term, pageNumber) {
-// The previous provider moved its search API from /ts-search.php
-// (now 404) to /lookup.php, with flat hits[] objects. MovieLinkBD
-// does not serve /lookup.php; this is kept unchanged and needs a
-// dedicated /search scraper when search is required here.
+// MovieLinkBD search is a plain HTML page - the inherited
+// /lookup.php endpoint returns 404 here. GET /search?q=...&page=N
+// renders the same movie-card grid as the category pages (30 per
+// page, "Found N Results" heading), so listings() parses it
+// directly. The site links page 1 without a page parameter.
 var url =
 base() +
-'/lookup.php?q=' +
+'/search?q=' +
 encodeURIComponent(term) +
-'&page=' +
-pageNumber +
-'&per_page=30';
+(pageNumber > 1 ? '&page=' + pageNumber : '');
 
-var response = JSON.parse(await get(url));
+var html = await get(url);
 
-if (!response || !Array.isArray(response.hits)) {
-throw new Error('Unexpected search response');
+// "Found 0 Results" pages ship no results grid at all.
+if (/Found\s+0\s+Results/i.test(html)) {
+return [];
 }
 
-var seen = {};
-
-return response.hits
-.map(function (hit) {
-// Support both the new flat shape and the legacy document shape.
-var document =
-hit && hit.document
-? hit.document
-: (hit || {});
-
-var href = absolute(document.permalink || '');
-var title = cleanTitle(document.post_title || '');
-
-var poster = absolute(
-document.post_thumbnail ||
-'/wp-content/uploads/2022/10/not-available.jpg'
-);
-
-if (!isPostPage(href) || !title || seen[href]) {
-return null;
+try {
+return listings(html);
+} catch (error) {
+// No results grid means an empty result set (or a layout change);
+// an empty list is a valid search outcome, not a hard error.
+if (!listingScope(html)) return [];
+throw error;
 }
-
-seen[href] = true;
-
-return new MultimediaItem({
-title: title,
-url: href,
-posterUrl: poster,
-type: kind(title, href),
-year: yearOf(title)
-});
-})
-.filter(function (item) {
-return item !== null;
-});
 }
 
 // =====================================
@@ -582,6 +625,93 @@ fail(callback, error);
 // SERIES EPISODES
 // =====================================
 
+// MovieLinkBD episode grids: one <div class="...ep-card" ...> per
+// episode (combined ranges carry data-range-start/end), each holding
+// encrypted data-dl download anchors labelled with their quality.
+// ZIP packs live in separate mlbd-zip-card blocks, so they are never
+// picked up here. Returns null when the page has no ep-cards, which
+// routes the call to the legacy link-page parser below.
+function mlbdEpisodeEntries(html) {
+var cardRe = /<div\b[^>]*class=["'][^"']*\bep-card\b[^"']*["'][^>]*>[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/gi;
+var entries = {};
+var found = false;
+var m;
+
+while ((m = cardRe.exec(html)) !== null) {
+found = true;
+
+var card = m[0];
+var opening = (card.match(/^<div\b[^>]*>/i) || [])[0] || '';
+var season = parseInt(attr(opening, 'data-season-number'), 10) || 1;
+var first = parseInt(attr(opening, 'data-range-start'), 10) ||
+parseInt(attr(opening, 'data-episode-number'), 10) ||
+0;
+var last = parseInt(attr(opening, 'data-range-end'), 10) || first;
+
+if (!first) continue;
+
+var links = [];
+var anchorRe = /<a(?=[\s>\/])[^>]*data-dl=["'][^"']+["'][^>]*>[\s\S]*?<\/a\s*>/gi;
+var am;
+
+while ((am = anchorRe.exec(card)) !== null) {
+var openA = (am[0].match(/^<a\b[^>]*>/i) || [])[0] || '';
+var decoded = decodeDataDl(openA);
+if (!decoded) continue;
+
+var label = text(am[0]);
+if (/zip/i.test(label)) continue;
+
+var qm = label.match(/\b(2160p|1440p|1080p|720p|480p|4k|2k)\b/i);
+links.push({
+url: absolute(decoded),
+quality: qm ? qm[1].toUpperCase() : 'Auto'
+});
+}
+
+if (!links.length) continue;
+
+var key = season + ':' + first + ':' + last + ':';
+if (!entries[key]) {
+entries[key] = { season: season, first: first, last: last, variant: '', links: [] };
+}
+
+links.forEach(function (entry) {
+if (!entries[key].links.some(function (e) { return e.url === entry.url; })) {
+entries[key].links.push(entry);
+}
+});
+}
+
+return found ? entries : null;
+}
+
+// Shared mapping: entries -> Episode objects. Episodes without a
+// direct FastDL link use the encoded #skyepisode form, which
+// loadStreams resolves through the /file/ chooser chain.
+function episodesFromEntries(entries, seriesUrl) {
+return Object.keys(entries).map(function (key) {
+var ep = entries[key];
+var name = ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
+if (ep.variant) name += ' - ' + ep.variant;
+var fallbackUrl = seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links));
+var fastDirect = ep.links.find(function (entry) {
+return entry && isFastDl(entry.url);
+});
+
+// Keep episode URLs short and directly resolvable. Use the encoded
+// multi-host form only when an episode has no FastDL link.
+return new Episode({
+name: name,
+url: fastDirect
+? fastDirect.url + '&quality=' + encodeURIComponent(fastDirect.quality || 'Auto')
+: fallbackUrl,
+season: ep.season,
+episode: ep.first
+});
+}).sort(function (a, b) { return a.season - b.season || a.episode - b.episode; });
+}
+
 // Headings on post pages and link-list pages, e.g.
 // "Season 1 Single Episodes 720p [600MB/E]" or "-:Episodes: 3:-".
 function headings(html) {
@@ -601,7 +731,7 @@ return list;
 }
 
 function anchorsIn(html) {
-return html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+return html.match(/<a(?=[\s>\/])[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
 }
 
 function anchorHref(anchor, page) {
@@ -610,6 +740,14 @@ return pageUrl(attr(tag, 'href'), page);
 }
 
 async function seriesEpisodes(html, seriesUrl) {
+// Current MovieLinkBD layout: encrypted episode cards on the post
+// page itself. Only fall back to the legacy link-page chain when no
+// ep-cards exist (older posts).
+var mlbdEntries = mlbdEpisodeEntries(html);
+if (mlbdEntries) {
+return episodesFromEntries(mlbdEntries, seriesUrl);
+}
+
 var titleTag = (html.match(/<h1\b[^>]*>[\s\S]*?<\/h1\s*>/i) || [])[0] || '';
 var fallbackSeasonMatch = text(titleTag).match(/\bseason\s*(\d+)\b|\bs0*(\d+)/i);
 var fallbackSeason = fallbackSeasonMatch ? Number(fallbackSeasonMatch[1] || fallbackSeasonMatch[2]) : 1;
@@ -743,26 +881,7 @@ if (links.length <= 2) add(page.group, 1, 1, links);
 }
 });
 
-return Object.keys(entries).map(function (key) {
-var ep = entries[key];
-var name = ep.first === ep.last ? 'Episode ' + ep.first : 'Episodes ' + ep.first + '–' + ep.last + ' (combined file)';
-if (ep.variant) name += ' - ' + ep.variant;
-var fallbackUrl = seriesUrl.split('#')[0] + '#skyepisode=' + encodeURIComponent(JSON.stringify(ep.links));
-var fastDirect = ep.links.find(function (entry) {
-return entry && isFastDl(entry.url);
-});
-
-// Keep episode URLs short and directly resolvable. Use the encoded
-// multi-host form only when an episode has no FastDL link.
-return new Episode({
-name: name,
-url: fastDirect
-? fastDirect.url + '&quality=' + encodeURIComponent(fastDirect.quality || 'Auto')
-: fallbackUrl,
-season: ep.season,
-episode: ep.first
-});
-}).sort(function (a, b) { return a.season - b.season || a.episode - b.episode; });
+return episodesFromEntries(entries, seriesUrl);
 }
 
 // =====================================
@@ -846,7 +965,10 @@ return (
 /^https?:\/\/[^\s]+\.(?:mp4|m3u8|mkv)(?:[?#].*)?$/i.test(url) ||
 /^https:\/\/pub-[a-f0-9]{32}\.r2\.dev\//i.test(url) ||
 /^https:\/\/[A-Za-z0-9-]+\.r2\.cloudflarestorage\.com\//i.test(url) ||
-/^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com\//i.test(url)
+/^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com\//i.test(url) ||
+// MovieLinkBD's FSL mirror serves the file straight from a
+// Cloudflare Worker (/d/<token>, video with Range support).
+/^https:\/\/[A-Za-z0-9.-]+\.workers\.dev\/d\/[A-Za-z0-9._~%-]+\/?(?:[?#].*)?$/i.test(url)
 );
 }
 
@@ -897,7 +1019,7 @@ var q = text(m[0]).match(/\b(2160p|1080p|1440p|720p|480p|4k|2k)\b/i);
 if (q) events.push({ index: m.index, quality: q[1].toUpperCase() });
 }
 
-var are = /<a\b[^>]*>[\s\S]*?<\/a\s*>/gi;
+var are = /<a(?=[\s>\/])[^>]*>[\s\S]*?<\/a\s*>/gi;
 while ((m = are.exec(html)) !== null) {
 var link = anchorHref(m[0], page);
 if (link) events.push({ index: m.index, url: link });
@@ -1356,10 +1478,31 @@ return;
 }
 
 var links = linksWithQuality(html, page, quality);
+
+// MovieLinkBD keeps real targets in encrypted data-dl anchors
+// (href="#"); decode them so the /file/ chain can be followed.
+var dlAnchors =
+html.match(/<a(?=[\s>\/])[^>]*data-dl=["'][^"']+["'][^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+
+dlAnchors.forEach(function (anchor) {
+var openA = (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
+var decoded = decodeDataDl(openA);
+if (!decoded) return;
+
+var label = text(anchor);
+if (/zip/i.test(label)) return;
+
+var qm = label.match(/\b(2160p|1440p|1080p|720p|480p|4k|2k)\b/i);
+links.push({
+url: absolute(decoded),
+quality: qm ? qm[1].toUpperCase() : quality
+});
+});
+
 var next = [];
 var pixelCandidates = [];
 // Only explicit V-Drive download buttons, not arbitrary navigation links.
-var vdriveButtons = (html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || []).filter(function (anchor) {
+var vdriveButtons = (html.match(/<a(?=[\s>\/])[^>]*>[\s\S]*?<\/a\s*>/gi) || []).filter(function (anchor) {
 return /v\s*-?\s*drive/i.test(text(anchor));
 }).map(function (anchor) {
 return anchorHref(anchor, page);
@@ -1393,9 +1536,17 @@ var link = entry.url;
 var linkQuality = entry.quality || quality;
 
 if (mediaUrl(link)) {
+var mediaSource = 'V-Cloud / Direct';
+
+if (isFastDl(page)) {
+mediaSource = 'G-Direct';
+} else if (/^https?:\/\/[A-Za-z0-9.-]+\.workers\.dev\/d\//i.test(link)) {
+mediaSource = 'FSL Server';
+}
+
 addStream(
 link,
-(isFastDl(page) ? 'G-Direct' : 'V-Cloud / Direct') + ' (' + linkQuality + ')',
+mediaSource + ' (' + linkQuality + ')',
 linkQuality,
 { Referer: page }
 );
@@ -1414,7 +1565,7 @@ gdflixCandidates.push({ url: link, quality: linkQuality });
 }
 } else if (
 depth < 3 &&
-nextHost(link) &&
+(nextHost(link) || isFilePage(link)) &&
 !seenPages[link] &&
 next.indexOf(link) < 0
 ) {
@@ -1457,7 +1608,7 @@ var initialQuality = initialQualityMatch
 
 if (episodeLinks) {
 var validLinks = episodeLinks.filter(function (entry) {
-return entry && (nextHost(entry.url) || isVDrive(entry.url));
+return entry && (nextHost(entry.url) || isVDrive(entry.url) || isFilePage(entry.url));
 });
 
 // Remove secondary mirrors before limiting, so they do not crowd out
