@@ -1078,6 +1078,34 @@ return match
 : (fallback || 'Auto');
 }
 
+// File size declared by the host page, shown in stream labels next
+// to the quality ("720P · 260 MB"). Matches the FSL "File Size"
+// meta row and MovieLinkBD's fa-database meta ("260.04 MB"); pages
+// that declare no size simply omit it from the label.
+function pageFileSize(html) {
+var content = String(html || '');
+var match =
+content.match(/File\s*Size\s*(?:<[^>]+>\s*)*([\d.,]+\s*(?:TB|GB|MB|KB|B))\b/i) ||
+content.match(/fa-database[^>]*><\/i>\s*([\d.,]+\s*(?:TB|GB|MB|KB|B))/i);
+
+return match ? match[1].replace(/\s+/g, ' ').toUpperCase() : '';
+}
+
+// Stream priority requested for this plugin:
+//   1) FSL Server
+//   2) V-Cloud / Direct (incl. G-Direct and plain Direct)
+// Remaining hosts keep their previous relative order after these.
+function sourcePriority(stream) {
+var label = String(stream.source || '');
+
+if (/^FSL Server\b/i.test(label)) return 0;
+if (/^V-Cloud \/ Direct\b/i.test(label) || /^G-Direct\b/i.test(label) || /^Direct\b/i.test(label)) return 1;
+if (/Pixel\s*Server/i.test(label)) return 3;
+if (/^V-Drive\b/i.test(label)) return 4;
+
+return 2;
+}
+
 function tokenPage(html, page) {
 var match = html.match(
 /atob\s*\(\s*atob\s*\(\s*["']([A-Za-z0-9+/=]+)["']\s*\)\s*\)/i
@@ -1544,9 +1572,12 @@ mediaSource = 'G-Direct';
 mediaSource = 'FSL Server';
 }
 
+// Show quality + file size together when the page declares one.
+var streamSize = pageFileSize(html);
+
 addStream(
 link,
-mediaSource + ' (' + linkQuality + ')',
+mediaSource + ' (' + linkQuality + (streamSize ? ' · ' + streamSize : '') + ')',
 linkQuality,
 { Referer: page }
 );
@@ -1713,6 +1744,13 @@ var sortedStreams = found
 return qualityRank(stream) !== 480;
 })
 .sort(function (a, b) {
+// Priority first (FSL -> V-Cloud/Direct -> the rest), quality
+// ordering inside each priority tier.
+var priorityA = sourcePriority(a);
+var priorityB = sourcePriority(b);
+
+if (priorityA !== priorityB) return priorityA - priorityB;
+
 var rankA = qualityRank(a);
 var rankB = qualityRank(b);
 
@@ -1724,12 +1762,7 @@ if (rankB === 0) {
 return -1;
 }
 
-if (rankA !== rankB) return rankA - rankB;
-function sourceRank(stream) {
-var label = String(stream.source || '');
-return /^V-Drive\b/i.test(label) ? 2 : /Pixel\s*Server/i.test(label) ? 1 : 0;
-}
-return sourceRank(a) - sourceRank(b);
+return rankA - rankB;
 });
 
 callback({
