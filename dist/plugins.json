@@ -117,6 +117,25 @@
     "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.katmoviehd.sky"
   },
   {
+    "packageName": "com.jnkyst.repo.movielinkbd",
+    "name": "MovieLinkBD",
+    "version": 1,
+    "baseUrl": "https://cmzguz.movielinkbd.at/",
+    "description": "MovieLinkBD plugin for TestPlugins",
+    "authors": [
+      "Deepak"
+    ],
+    "languages": [
+      "hi",
+      "en"
+    ],
+    "categories": [
+      "Movies",
+      "Series"
+    ],
+    "url": "https://raw.githubusercontent.com/jnkyst/TestPlugins/main/dist/com.jnkyst.repo.movielinkbd.sky"
+  },
+  {
     "packageName": "com.jnkyst.repo.movies4u",
     "name": "Movies4u",
     "version": 6,

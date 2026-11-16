@@ -1,0 +1,18 @@
+{
+  "packageName": "com.jnkyst.repo.movielinkbd",
+  "name": "MovieLinkBD",
+  "version": 1,
+  "baseUrl": "https://cmzguz.movielinkbd.at/",
+  "description": "MovieLinkBD plugin for TestPlugins",
+  "authors": [
+    "Deepak"
+  ],
+  "languages": [
+    "hi",
+    "en"
+  ],
+  "categories": [
+    "Movies",
+    "Series"
+  ]
+}
