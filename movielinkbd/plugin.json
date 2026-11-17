@@ -2,10 +2,10 @@
   "packageName": "com.jnkyst.repo.movielinkbd",
   "name": "MovieLinkBD",
   "version": 1,
-  "baseUrl": "https://zq7m2s.movielinkbd.at/",
+  "baseUrl": "https://movielinkbd.info/",
   "description": "MovieLinkBD plugin for TestPlugins",
   "authors": [
-    "Deepak"
+    "Jnkyst"
   ],
   "languages": [
     "hi",

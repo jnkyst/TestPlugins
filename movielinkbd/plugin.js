@@ -35,8 +35,125 @@
 (function () {
 'use strict';
 
+// The site's generated subdomain rotates often (cmzguz ->
+// x7ykrg -> ywqpaz -> ...). Old hosts 302 to the live one, and every
+// live page declares its own host in rel=canonical / og:url, so
+// noteOrigin() re-anchors the origin for the rest of the session on
+// the first page fetched. manifest.baseUrl may point at the stable
+// primary/landing domain (e.g. https://movielinkbd.info/) - landing
+// pages link out to the content subdomain, which noteOrigin()
+// resolves. Editing plugin.json while the plugin runs is also picked
+// up: a changed manifest.baseUrl discards the cached origin.
+var liveOrigin = '';
+var lastManifestBase = String((manifest && manifest.baseUrl) || '');
+
 function base() {
-return String(manifest.baseUrl || '').replace(/\/+$/, '');
+var configured = String((manifest && manifest.baseUrl) || '');
+
+// baseUrl value changed at runtime (plugin.json edited / reloaded):
+// forget the page-derived origin so the new value takes effect on the
+// very next request.
+if (configured && configured !== lastManifestBase) {
+lastManifestBase = configured;
+liveOrigin = '';
+}
+
+return String(liveOrigin || configured || lastManifestBase).replace(/\/+$/, '');
+}
+
+function noteOrigin(responseUrl, html) {
+var host = '';
+var scheme = 'https';
+
+// 1) Final URL after redirects, when the runtime exposes it.
+var fromUrl = String(responseUrl || '').match(/^(https?):\/\/([^\/:?#]+)/i);
+if (fromUrl && /(^|\.)movielinkbd\.[a-z.]+$/i.test(fromUrl[2])) {
+scheme = fromUrl[1].toLowerCase();
+host = fromUrl[2];
+}
+
+var body = String(html || '');
+
+// 2) rel=canonical / og:url of the fetched page.
+if (!host && body) {
+var declared =
+body.match(/<link[^>]*rel=["']canonical["'][^>]*href=["'](https?):\/\/([^"\/]+)["']/i) ||
+body.match(/<meta[^>]*property=["']og:url["'][^>]*content=["'](https?):\/\/([^"\/]+)["']/i);
+
+if (declared && /(^|\.)movielinkbd\.[a-z.]+$/i.test(declared[2])) {
+scheme = declared[1].toLowerCase();
+host = declared[2];
+}
+}
+
+// 3) Primary/landing domains (apex hosts like movielinkbd.info)
+//    declare themselves as canonical but link out to the real
+//    content subdomain (the generated subdomain rotates often).
+//    Prefer the subdomain the page points at, so baseUrl set to
+//    the stable primary domain still resolves the working site.
+if (body && (!host || /^movielinkbd\.[a-z.]+$/i.test(host))) {
+var found = body.match(/https:\/\/([a-z0-9-]+\.movielinkbd\.[a-z.]+)/i);
+if (found) {
+scheme = 'https';
+host = found[1];
+}
+}
+
+if (!host || !/(^|\.)movielinkbd\.[a-z.]+$/i.test(host)) return;
+
+var origin = scheme + '://' + host.toLowerCase();
+
+if (origin !== liveOrigin) {
+liveOrigin = origin;
+}
+
+// Reflect the live origin back into manifest.baseUrl, so the baseUrl
+// value itself changes at runtime whenever the domain moves.
+try {
+if (manifest && typeof manifest === 'object') {
+manifest.baseUrl = origin + '/';
+lastManifestBase = manifest.baseUrl;
+}
+} catch (error) {
+// manifest may be read-only; liveOrigin still drives base().
+}
+}
+
+// Resolve the content baseUrl automatically on first use: when
+// manifest.baseUrl is the stable PRIMARY/landing domain (e.g.
+// https://movielinkbd.info/), fetch its homepage once and let
+// noteOrigin() pull the live content subdomain out of its links, so
+// every subsequent request goes direct to the content host.
+// Subdomain baseUrl values skip the bootstrap (the first real fetch
+// re-anchors them). Re-runs after a runtime edit of manifest.baseUrl.
+var bootstrapDone = false;
+var bootstrappedFrom = '';
+
+async function ensureBase() {
+var configured = String((manifest && manifest.baseUrl) || '');
+
+if (bootstrapDone && configured === bootstrappedFrom) {
+return;
+}
+
+bootstrappedFrom = configured;
+bootstrapDone = true;
+
+var host =
+((configured.match(/^https?:\/\/([^\/]+)/i) || [])[1] || '')
+.toLowerCase()
+.replace(/^www\./, '');
+
+if (!/^movielinkbd\.[a-z.]+$/.test(host)) {
+return; // already a content subdomain (or non-movielinkbd value)
+}
+
+try {
+await get(configured.replace(/\/+$/, '') + '/');
+} catch (error) {
+// Primary unreachable: keep it as baseUrl; the per-fetch rescue
+// paths recover as soon as any page becomes reachable.
+}
 }
 
 function decode(value) {
@@ -160,12 +277,13 @@ return '';
 
 // ── Single-source domain handling ──────────────────────────────
 // Only ONE place controls the site origin: manifest.baseUrl in
-// plugin.json. isSiteUrl() recognises every known MovieLinkBD mirror
-// via a host pattern (any *.movielinkbd.* host), and
-// normalizeSiteUrl() rewrites any of them to base(). Changing
-// baseUrl in plugin.json is therefore sufficient when the generated
-// subdomain moves (e.g. cmzguz -> a new one) - the code fetches from
-// the new origin and old/bookmarked URLs keep resolving.
+// plugin.json, upgraded at runtime by noteOrigin() from each page's
+// canonical/og:url when the generated subdomain rotates (cmzguz ->
+// x7ykrg -> ywqpaz -> ...). isSiteUrl() recognises every known
+// MovieLinkBD mirror via a host pattern (any *.movielinkbd.* host),
+// and normalizeSiteUrl() rewrites any of them to base(). Old hosts
+// 302 to the live one, so bookmarks from previous subdomains keep
+// resolving even before plugin.json is updated.
 function isSiteUrl(url) {
 var host = (String(url || '').match(/^https?:\/\/([^\/:?#]+)/i) || [])[1] || '';
 host = host.toLowerCase().replace(/^www\./i, '');
@@ -286,9 +404,9 @@ resolve();
 async function get(url) {
 var lastError = null;
 
-for (var attempt = 0; attempt < 2; attempt++) {
+for (var attempt = 0; attempt < 3; attempt++) {
 if (attempt > 0) {
-await delay(1200);
+await delay(attempt === 1 ? 1500 : 3000);
 console.error(
 'Retrying request (attempt ' + (attempt + 1) + '): ' + url
 );
@@ -315,7 +433,16 @@ var status = Number(response.status) || 0;
 
 // Status-less responses are treated as success (as before).
 if (!(status && (status < 200 || status >= 400))) {
-return String(response.body || '');
+var body = String(response.body || '');
+
+// Re-anchor the origin if the site moved (stale subdomain ->
+// 302 -> live host, or the runtime's final URL).
+noteOrigin(
+(response && (response.url || response.finalUrl)) || '',
+body
+);
+
+return body;
 }
 
 lastError = new Error('HTTP request failed: ' + response.status);
@@ -488,13 +615,22 @@ async function searchItems(term, pageNumber) {
 // renders the same movie-card grid as the category pages (30 per
 // page, "Found N Results" heading), so listings() parses it
 // directly. The site links page 1 without a page parameter.
-var url =
-base() +
+await ensureBase();
+
+var queryPath =
 '/search?q=' +
 encodeURIComponent(term) +
 (pageNumber > 1 ? '&page=' + pageNumber : '');
 
-var html = await get(url);
+var fetchBase = base();
+var html = await get(fetchBase + queryPath);
+
+// Landing/primary baseUrl (e.g. movielinkbd.info): noteOrigin() may
+// have just resolved the real content host from the fetched page, so
+// re-run the search there instead of parsing the landing page.
+if (base() !== fetchBase && !listingScope(html)) {
+html = await get(base() + queryPath);
+}
 
 // "Found 0 Results" pages ship no results grid at all.
 if (/Found\s+0\s+Results/i.test(html)) {
@@ -525,6 +661,10 @@ var sections = [
 ];
 
 try {
+// Resolve the primary/landing baseUrl -> content host first, so
+// every section fetch already goes direct.
+await ensureBase();
+
 // Fetch sections strictly one at a time: parallel requests make
 // the runtime's HTTP layer answer 500 for all but the first one.
 var results = [];
@@ -533,9 +673,22 @@ for (var i = 0; i < sections.length; i++) {
 var section = sections[i];
 
 try {
-var items = listings(
-await get(base() + section.path)
-);
+var fetchBase = base();
+var html = await get(fetchBase + section.path);
+var items;
+
+try {
+items = listings(html);
+} catch (parseError) {
+// A primary/landing baseUrl serves the landing page for every
+// path; noteOrigin() resolves the real content host from it, so
+// re-fetch the section there once before giving up.
+if (base() !== fetchBase) {
+items = listings(await get(base() + section.path));
+} else {
+throw parseError;
+}
+}
 
 results.push({ items: items, error: null });
 } catch (error) {
@@ -551,7 +704,7 @@ results.push({ items: [], error: error });
 
 // Pace same-host page loads so no section is rate-limited.
 if (i < sections.length - 1) {
-await delay(400);
+await delay(600);
 }
 }
 
@@ -889,6 +1042,7 @@ return episodesFromEntries(entries, seriesUrl);
 // =====================================
 
 async function load(url, callback) {
+await ensureBase();
 url = normalizeSiteUrl(url);
 
 try {
@@ -896,7 +1050,18 @@ if (!isSourcePage(url)) {
 throw new Error('Not a page on the configured site');
 }
 
+var fetchBase = base();
 var html = await get(url);
+
+// The fetch may have re-anchored the origin (subdomain rotation or
+// landing domain); rebuild the item URL so nothing stale is ever
+// returned, and re-fetch the post page on the resolved content host
+// if the fetch itself came from the old/landing origin.
+url = normalizeSiteUrl(url);
+
+if (base() !== fetchBase) {
+html = await get(url);
+}
 
 var heading =
 (html.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i) || [])[0];
@@ -968,7 +1133,7 @@ return (
 /^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com\//i.test(url) ||
 // MovieLinkBD's FSL mirror serves the file straight from a
 // Cloudflare Worker (/d/<token>, video with Range support).
-/^https:\/\/[A-Za-z0-9.-]+\.workers\.dev\/d\/[A-Za-z0-9._~%-]+\/?(?:[?#].*)?$/i.test(url)
+/^https:\/\/(?:[A-Za-z0-9.-]+\.workers\.dev|fsl\.[A-Za-z0-9.-]+)\/d\/[A-Za-z0-9._~%-]+\/?(?:[?#].*)?$/i.test(url)
 );
 }
 
@@ -1369,6 +1534,7 @@ return urls;
 // =====================================
 
 async function loadStreams(url, callback) {
+await ensureBase();
 url = normalizeSiteUrl(url);
 
 try {
@@ -1568,7 +1734,7 @@ var mediaSource = 'V-Cloud / Direct';
 
 if (isFastDl(page)) {
 mediaSource = 'G-Direct';
-} else if (/^https?:\/\/[A-Za-z0-9.-]+\.workers\.dev\/d\//i.test(link)) {
+} else if (/^https?:\/\/(?:[A-Za-z0-9.-]+\.workers\.dev\/d\/|fsl\.[A-Za-z0-9.-]+\/d\/)/i.test(link)) {
 mediaSource = 'FSL Server';
 }
 
