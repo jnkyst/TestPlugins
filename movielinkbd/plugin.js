@@ -148,8 +148,16 @@ if (!/^movielinkbd\.[a-z.]+$/.test(host)) {
 return; // already a content subdomain (or non-movielinkbd value)
 }
 
+// Remember the stable primary so get() can rediscover the content
+// subdomain later even when every content request fails outright
+// (no response body to re-anchor from).
+primaryOrigin = 'https://' + host + '/';
+
 try {
 await get(configured.replace(/\/+$/, '') + '/');
+// Pace: right after the bootstrap fetch the runtime tends to answer
+// the very next request with a transient 500.
+await delay(400);
 } catch (error) {
 // Primary unreachable: keep it as baseUrl; the per-fetch rescue
 // paths recover as soon as any page becomes reachable.
@@ -401,12 +409,55 @@ resolve();
 // must never overlap http_get calls: parallel requests make the
 // SkyStream HTTP layer answer 500 for all but the first one, and a
 // transient 500 (rate limiting) is retried once after a short wait.
-async function get(url) {
-var lastError = null;
+// Stable primary/landing origins - remembered from the bootstrap or
+// built in - used to rediscover the live content subdomain when a
+// content host fails EVERY attempt without returning a body (the
+// runtime reports cross-host 302s as plain 500s, so there is nothing
+// inside the response to re-anchor from).
+var primaryOrigin = '';
 
-for (var attempt = 0; attempt < 3; attempt++) {
+async function rediscover(failingOrigin) {
+var candidates = [];
+if (primaryOrigin) candidates.push(primaryOrigin);
+candidates.push('https://movielinkbd.info/');
+candidates.push('https://movielinkbd.at/');
+
+var seen = {};
+var failing = String(failingOrigin || '').toLowerCase();
+
+for (var i = 0; i < candidates.length; i++) {
+var origin = candidates[i].replace(/\/+$/, '');
+var host =
+((origin.match(/^https?:\/\/([^\/]+)/i) || [])[1] || '').toLowerCase();
+
+if (!host || host === failing || seen[host]) continue;
+seen[host] = true;
+
+try {
+await get(origin + '/');
+} catch (error) {
+continue;
+}
+
+var resolvedHost =
+((base().match(/^https?:\/\/([^\/]+)/i) || [])[1] || '').toLowerCase();
+
+if (resolvedHost && resolvedHost !== failing) {
+return true;
+}
+}
+
+return false;
+}
+
+async function get(url, _depth) {
+_depth = _depth || 0;
+var lastError = null;
+var waits = [0, 1500, 3000, 5000];
+
+for (var attempt = 0; attempt < 4; attempt++) {
 if (attempt > 0) {
-await delay(attempt === 1 ? 1500 : 3000);
+await delay(waits[attempt]);
 console.error(
 'Retrying request (attempt ' + (attempt + 1) + '): ' + url
 );
@@ -450,6 +501,31 @@ lastError = new Error('HTTP request failed: ' + response.status);
 // 4xx (except 429) is permanent; 429 and 5xx are worth one retry.
 if (status < 500 && status !== 429) {
 throw lastError;
+}
+}
+
+// Every attempt failed with no body to re-anchor from. If this was a
+// content-subdomain URL, rediscover the live host from the primary
+// domain and try once more against it.
+var failHost = ((String(url).match(/^https?:\/\/([^\/]+)/i) || [])[1] || '')
+.toLowerCase()
+.replace(/^www\./, '');
+var isContentHost =
+/(^|\.)movielinkbd\.[a-z.]+$/.test(failHost) &&
+!/^movielinkbd\.[a-z.]+$/.test(failHost);
+
+if (!_depth && isContentHost) {
+try {
+if (await rediscover(failHost)) {
+var recovered = normalizeSiteUrl(url);
+
+if (recovered !== url) {
+await delay(400);
+return await get(recovered, _depth + 1);
+}
+}
+} catch (error) {
+// fall through to the original error
 }
 }
 
