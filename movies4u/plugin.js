@@ -20,8 +20,51 @@
 (function () {
 'use strict';
 
+var resolvedBase = '';
+var resolvedAt = 0;
+var resolvePending = null;
+
 function base() {
-return String(manifest.baseUrl || '').replace(/\/+$/, '');
+return resolvedBase || String(manifest.baseUrl || '').replace(/\/+$/, '');
+}
+
+// Resolve the configured entry URL itself, not entry URL + a page path.
+// SkyStream CLI may follow redirects without exposing the final URL; the
+// landing page's canonical URL is therefore also used as a fallback.
+async function ensureBase() {
+if (resolvedBase && Date.now() - resolvedAt < 5 * 60 * 1000) return resolvedBase;
+if (resolvePending) return resolvePending;
+resolvePending = (async function () {
+var configured = String(manifest.baseUrl || '').trim();
+if (!/^https?:\/\//i.test(configured)) throw new Error('Invalid manifest.baseUrl');
+var response = await http_get(configured, { 'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html,application/xhtml+xml' });
+if (!response || (response.status && (response.status < 200 || response.status >= 400))) {
+throw new Error('Could not resolve baseUrl: HTTP ' + (response && response.status));
+}
+var candidate = String(response.finalUrl || response.final_url || response.responseUrl || response.url || '');
+if (!candidate || candidate.replace(/\/+$/, '') === configured.replace(/\/+$/, '')) {
+var headers = response.headers || {};
+candidate = headers.location || headers.Location || '';
+}
+if (!candidate || candidate.replace(/\/+$/, '') === configured.replace(/\/+$/, '')) {
+var tags = String(response.body || '').match(/<link\b[^>]*>/gi) || [];
+for (var i = 0; i < tags.length; i++) {
+if (/\bcanonical\b/i.test(attr(tags[i], 'rel'))) { candidate = attr(tags[i], 'href'); break; }
+}
+}
+if (!candidate && isSiteUrl(configured)) candidate = configured;
+var origin = String(candidate).match(/^(https?:\/\/[^\/:?#]+(?::\d+)?)(?:[\/?#]|$)/i);
+if (!origin || !/^https?:\/\//i.test(candidate) || /^(?:https?:\/\/)?(?:localhost|127\.|0\.0\.0\.0|\[)/i.test(candidate)) {
+throw new Error('Could not determine the site origin from baseUrl');
+}
+if (origin[1].toLowerCase() === (configured.match(/^https?:\/\/[^\/]+/i) || [''])[0].toLowerCase() && !isSiteUrl(configured)) {
+throw new Error('baseUrl did not resolve to a site origin');
+}
+resolvedBase = origin[1].replace(/\/+$/, '');
+resolvedAt = Date.now();
+return resolvedBase;
+})();
+try { return await resolvePending; } finally { resolvePending = null; }
 }
 
 function decode(value) {
@@ -96,21 +139,27 @@ return output;
 // Only ONE place controls the site origin: manifest.baseUrl in
 // plugin.json.  isSiteUrl() recognises every known Movies4u mirror
 // via a host pattern (any *.movies4u.garden, movies4u.foo, etc.),
-// and normalizeSiteUrl() rewrites any of them to base().
-// Changing baseUrl in plugin.json is therefore sufficient when the
-// domain moves (e.g. new6 -> new7 -> movies4u.foo) - the code
-// fetches from the new origin and old/bookmarked URLs keep resolving.
+// and normalizeSiteUrl() rewrites any of them to the resolved origin.
+// The configured entry URL is refreshed every five minutes; old known
+// Movies4u mirror URLs are normalized before fetching.
 function isSiteUrl(url) {
 var host = (String(url || '').match(/^https?:\/\/([^\/:?#]+)/i) || [])[1] || '';
 host = host.toLowerCase().replace(/^www\./i, '');
 if (!host) return false;
+var currentHost = (resolvedBase.match(/^https?:\/\/([^\/:?#]+)/i) || [])[1] || '';
+if (currentHost && host === currentHost.toLowerCase().replace(/^www\./i, '')) return true;
 if (/(^|\.)movies4u\.(garden|foo|review)$/i.test(host)) return true;
 return false;
 }
 
 function normalizeSiteUrl(url) {
-if (!isSiteUrl(url)) return String(url || '');
-return String(url).replace(/^https?:\/\/[^\/]+/i, base());
+url = String(url || '');
+var configured = String(manifest.baseUrl || '').replace(/\/+$/, '');
+if (resolvedBase && configured && (url === configured || url.indexOf(configured + '/') === 0 || url.indexOf(configured + '#') === 0)) {
+return resolvedBase + url.slice(configured.length);
+}
+if (!isSiteUrl(url)) return url;
+return url.replace(/^https?:\/\/[^\/?#]+/i, base());
 }
 
 function absolute(url) {
@@ -416,6 +465,7 @@ path: '/category/hollywood-movies/'
 ];
 
 try {
+await ensureBase();
 var results = await Promise.all(
 sections.map(async function (section) {
 try {
@@ -480,6 +530,7 @@ page = 1;
 }
 
 try {
+await ensureBase();
 var term = String(query || '').trim();
 
 if (!term) {
@@ -635,7 +686,7 @@ var section = page.html.slice(h.end, i + 1 < pageHeads.length ? pageHeads[i + 1]
 var links = anchorsIn(section)
 .map(function (a) { return anchorHref(a, page.group.url); })
 .filter(function (url) {
-return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url) ||
+return /^https:\/\/(?:www\.)?hubcloud\.(?:pw|mov)\/drive\//i.test(url) ||
 /^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url);
 });
 
@@ -651,7 +702,7 @@ if (!foundEpisode) {
 var links = anchorsIn(page.html)
 .map(function (a) { return anchorHref(a, page.group.url); })
 .filter(function (url) {
-return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url) ||
+return /^https:\/\/(?:www\.)?hubcloud\.(?:pw|mov)\/drive\//i.test(url) ||
 /^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url);
 });
 // Multi-file pages without recognizable episode headings must not be
@@ -687,9 +738,9 @@ episode: ep.first
 // =====================================
 
 async function load(url, callback) {
-url = normalizeSiteUrl(url);
-
 try {
+await ensureBase();
+url = normalizeSiteUrl(url);
 if (!isSourcePage(url)) {
 throw new Error('Not a page on the configured site');
 }
@@ -853,7 +904,7 @@ if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
 if (isFastDl(url)) return true;
 if (/^https:\/\/m4ulinks\.[a-z]+\/number\/\d+/i.test(url)) return true;
 if (/^https:\/\/m4uplay\.quest\/file\//i.test(url)) return true;
-if (/^https:\/\/(?:www\.)?hubcloud\.pw\/drive\//i.test(url)) return true;
+if (/^https:\/\/(?:www\.)?hubcloud\.(?:pw|mov)\/drive\//i.test(url)) return true;
 if (/^https:\/\/(?:www\.)?gdflix\.(?:vip|io)\/file\//i.test(url)) return true;
 if (/^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:\?.*)?$/i.test(url)) return true;
 // Ignore NexDrive navigation/category pages, which contain unrelated files.
@@ -971,7 +1022,7 @@ throw new Error('V-Drive link not ready');
 // endpoint (gamerxyt.com). That page lists presigned R2 download
 // URLs for the file, which the player can stream directly.
 function isHubCloud(url) {
-return /^https:\/\/(?:www\.)?hubcloud\.pw\/drive\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(url || '');
+return /^https:\/\/(?:www\.)?hubcloud\.(?:pw|mov)\/drive\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(url || '');
 }
 
 // Combined episode packs (e.g. "Episodes: 13-17") are uploaded as
@@ -1136,9 +1187,9 @@ return urls;
 // =====================================
 
 async function loadStreams(url, callback) {
-url = normalizeSiteUrl(url);
-
 try {
+await ensureBase();
+url = normalizeSiteUrl(url);
 var marker = '#skyepisode=';
 var markerIndex = url.indexOf(marker);
 var episodeLinks = null;
@@ -1473,23 +1524,19 @@ var sortedStreams = found
 return qualityRank(stream) !== 480;
 })
 .sort(function (a, b) {
-var rankA = qualityRank(a);
-var rankB = qualityRank(b);
-
-if (rankA === 0) {
-return rankB === 0 ? 0 : 1;
-}
-
-if (rankB === 0) {
-return -1;
-}
-
-if (rankA !== rankB) return rankA - rankB;
 function sourceRank(stream) {
 var label = String(stream.source || '');
-return /^V-Drive\b/i.test(label) ? 2 : /Pixel\s*Server/i.test(label) ? 1 : 0;
+if (/^FSL Server V2\b/i.test(label)) return 1;
+if (/^FSL Server\b/i.test(label)) return 0;
+if (/Pixel\s*Server/i.test(label)) return 2;
+return 3;
 }
-return sourceRank(a) - sourceRank(b);
+var serverOrder = sourceRank(a) - sourceRank(b);
+if (serverOrder) return serverOrder;
+var rankA = qualityRank(a), rankB = qualityRank(b);
+if (!rankA) return rankB ? 1 : 0;
+if (!rankB) return -1;
+return rankA - rankB;
 });
 
 callback({
