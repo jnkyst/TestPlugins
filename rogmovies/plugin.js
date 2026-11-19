@@ -503,7 +503,7 @@
           // When the site offers a season file without individual episode
           // headings, keep the season file as one item, not fake episodes.
           var hasHost = extractLinks(page.html, page.group.url).some(function (link) {
-            return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(link) || isVDrive(link);
+            return /^https:\/\/(?:www\.)?vcloud\.(?:beer|my)\//i.test(link) || isVDrive(link);
           });
           var pageTitle = text((page.html.match(/<title\b[^>]*>[\s\S]*?<\/title\s*>/i) || [])[0] || '');
           if (hasHost && /\b(?:season\s*\d+|s0*\d+)\b/i.test(pageTitle)) seasonFiles.push(page.group);
@@ -513,7 +513,7 @@
       episodeHeads.forEach(function (ep, i) {
         var end = i + 1 < episodeHeads.length ? episodeHeads[i + 1].start : page.html.length;
         var links = extractLinks(page.html.slice(ep.end, end), page.group.url).filter(function (url) {
-          return /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url) || isVDrive(url);
+          return /^https:\/\/(?:www\.)?vcloud\.(?:beer|my)\//i.test(url) || isVDrive(url);
         });
         add(page.group, ep.first, ep.last, links);
       });
@@ -664,7 +664,7 @@
   }
 
   function nextHost(url) {
-    if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(url)) return true;
+    if (/^https:\/\/(?:www\.)?vcloud\.(?:beer|my)\//i.test(url)) return true;
     // Ignore NexDrive navigation/category pages, which contain unrelated files.
     return /^https:\/\/(?:www\.)?nexdrive\.beer\/genxfm\d+\/?(?:[?#].*)?$/i.test(url);
   }
@@ -732,6 +732,37 @@
     return 0;
   }
 
+  // Read a file size only from explicit metadata, not from the title or page ads.
+  function vcloudSize(html) {
+    var heads = html.match(/<h[1-4]\b[^>]*>[\s\S]*?<\/h[1-4]\s*>/gi) || [];
+    for (var i = 0; i < heads.length; i++) {
+      var match = text(heads[i]).match(/\bSize\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|GiB|MiB|KiB)\b/i);
+      if (match) return match[1] + ' ' + match[2].toUpperCase();
+    }
+    return '';
+  }
+
+  function vdriveSize(html) {
+    var pills = html.match(/<span\b[^>]*class=["'][^"']*\bmeta-pill\b[^"']*["'][^>]*>[\s\S]*?<\/span\s*>/gi) || [];
+    for (var i = 0; i < pills.length; i++) {
+      var match = text(pills[i]).match(/(?:📦|\bsize\b)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|GiB|MiB|KiB)\b/i);
+      if (match) return match[1] + ' ' + match[2].toUpperCase();
+    }
+    return '';
+  }
+
+  function sizeFromBytes(value) {
+    var n = Number(value);
+    if (!isFinite(n) || n <= 0) return '';
+    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'], i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i ? n.toFixed(2).replace(/\.?0+$/, '') : String(Math.round(n))) + ' ' + units[i];
+  }
+
+  function streamLabel(source, quality, size) {
+    return source + ' (' + quality + (size ? ' · ' + size : '') + ')';
+  }
+
   // Vega Drive share pages require a session and prepare a short-lived URL.
   function isVDrive(url) {
     return /^https:\/\/one\.vegadrive\.(?:me|app)\/s\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(url || '');
@@ -768,7 +799,9 @@
 
     var share = root + '/s/' + id;
     var intermediate = root + '/d/' + id + '/skydrop';
-    await request(share);
+    var shareHtml = await request(share);
+    var shareSize = vdriveSize(shareHtml);
+    var shareQuality = qualityFrom(shareHtml, 'Auto');
     await request(intermediate, share);
     var prepare = root + '/__vega_bridge/prepare/' + id + '?provider=skydrop';
     var fetchLink = root + '/download-link/' + id + '/skydrop';
@@ -784,7 +817,7 @@
           if (!/^https:\/\/(?:[A-Za-z0-9-]+\.)+(?:googleusercontent|googlevideo)\.com(?::443)?\//i.test(data.download_url)) {
             throw new Error('Unexpected V-Drive download host');
           }
-          return data.download_url;
+          return {url:data.download_url, size:shareSize, quality:shareQuality};
         }
       }
       if (attempt < 2) await new Promise(function (resolve) { setTimeout(resolve, 2000); });
@@ -844,7 +877,7 @@
       var failures = 0;
       var vdriveCandidates = [];
 
-      async function scan(page, depth, quality) {
+      async function scan(page, depth, quality, inheritedSize) {
         if (seenPages[page] || depth > 3) {
           return;
         }
@@ -872,6 +905,13 @@
         }
 
         quality = qualityFrom(html, quality);
+        var size = vcloudSize(html) || inheritedSize || '';
+        var fslLinks = (html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || []).filter(function (anchor) {
+          return /\bFSL\b/i.test(text(anchor));
+        }).map(function (anchor) {
+          var tag = (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
+          return pageUrl(attr(tag, 'href'), page);
+        });
 
         var links = extractLinks(html, page);
         var next = [];
@@ -885,7 +925,7 @@
         });
 
         if (
-          /^https:\/\/(?:www\.)?vcloud\.beer\//i.test(page)
+          /^https:\/\/(?:www\.)?vcloud\.(?:beer|my)\//i.test(page)
         ) {
           var tokenUrl = tokenPage(html, page);
 
@@ -909,15 +949,14 @@
             found.push(
               new StreamResult({
                 url: link,
-                source:
-                  'V-Cloud / Direct (' + quality + ')',
+                source: streamLabel(fslLinks.indexOf(link) >= 0 ? 'V-Cloud / FSL Server' : 'V-Cloud / Direct', quality, size),
                 quality: quality,
                 headers: {
                   Referer: page
                 }
               })
             );
-          } else if (/^https:\/\/(?:www\.)?vcloud\.beer\//i.test(page) &&
+          } else if (/^https:\/\/(?:www\.)?vcloud\.(?:beer|my)\//i.test(page) &&
                      /^https:\/\/pixeldrain\.dev\/u\/[A-Za-z0-9]+\/?(?:[?#].*)?$/i.test(link)) {
             var pixelId = link.match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/i)[1];
             if (pixelCandidates.indexOf(pixelId) < 0) pixelCandidates.push(pixelId);
@@ -948,7 +987,7 @@
             var pixelVideo = 'https://pixeldrain.dev/api/file/' + id;
             if (!seenStreams[pixelVideo]) {
               seenStreams[pixelVideo] = true;
-              found.push(new StreamResult({url: pixelVideo, source: 'V-Cloud / PixelServer (' + quality + ')', quality: quality}));
+              found.push(new StreamResult({url: pixelVideo, source: streamLabel('V-Cloud / PixelServer', quality, sizeFromBytes(info.size) || size), quality: quality}));
             }
           } catch (error) {
             console.error('PixelServer metadata check failed: ' + String(error));
@@ -960,7 +999,7 @@
         for (var i = 0; i < limited.length; i += 2) {
           await Promise.all(
             limited.slice(i, i + 2).map(function (link) {
-              return scan(link, depth + 1, quality);
+              return scan(link, depth + 1, quality, size);
             })
           );
         }
@@ -997,10 +1036,11 @@
         for (var j = 0; j < fallback.length; j++) {
           try {
             var video = await resolveVDrive(fallback[j].url);
-            if (!seenStreams[video]) {
-              seenStreams[video] = true;
+            if (!seenStreams[video.url]) {
+              seenStreams[video.url] = true;
               var label = String(fallback[j].quality || 'Auto');
-              found.push(new StreamResult({ url: video, source: 'V-Drive (' + label + ')', quality: label }));
+              if (label === 'Auto' && video.quality !== 'Auto') label = video.quality;
+              found.push(new StreamResult({ url: video.url, source: streamLabel('V-Drive', label, video.size), quality: label }));
             }
           } catch (error) {
             failures++;
@@ -1025,23 +1065,20 @@
           return qualityRank(stream) !== 480;
         })
         .sort(function (a, b) {
-          var rankA = qualityRank(a);
-          var rankB = qualityRank(b);
-
-          if (rankA === 0) {
-            return rankB === 0 ? 0 : 1;
-          }
-
-          if (rankB === 0) {
-            return -1;
-          }
-
-          if (rankA !== rankB) return rankA - rankB;
+          // FSL first, then PixelServer, other direct links, then V-Drive.
           function sourceRank(stream) {
-            var label = String(stream.source || '');
-            return /^V-Drive\b/i.test(label) ? 2 : /PixelServer/i.test(label) ? 1 : 0;
+            var name = String(stream.source || '');
+            if (/^V-Drive\b/i.test(name)) return 3;
+            if (/FSL Server/i.test(name)) return 0;
+            if (/PixelServer/i.test(name)) return 1;
+            return 2;
           }
-          return sourceRank(a) - sourceRank(b);
+          var sourceDiff = sourceRank(a) - sourceRank(b);
+          if (sourceDiff) return sourceDiff;
+          var rankA = qualityRank(a), rankB = qualityRank(b);
+          if (rankA === 0 && rankB !== 0) return 1;
+          if (rankB === 0 && rankA !== 0) return -1;
+          return rankA - rankB;
         });
 
       callback({

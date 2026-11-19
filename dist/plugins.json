@@ -198,7 +198,7 @@
   {
     "packageName": "com.jnkyst.repo.rogmovies",
     "name": "RogMovies",
-    "version": 5,
+    "version": 6,
     "description": "Provider for RogMovies (Bollywood, Hollywood & Hindi Dubbed)",
     "author": "Jnkyst",
     "baseUrl": "https://vglist.pics/",
