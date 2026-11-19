@@ -1117,6 +1117,56 @@ return episodesFromEntries(entries, seriesUrl);
 // MOVIE / SERIES DETAILS
 // =====================================
 
+// Content-typed JSON-LD node declaring a name: the site embeds a big
+// @graph (WebSite/Organization/... + the actual content node). Only
+// Movie/TVSeries/etc. count - their "name" is the EXACT full title
+// ("X (2026) S01 [Ep 01-12 ORG Hindi Completed]") and their @type is
+// the semantically correct type. Everything is fetched from the page.
+function jsonLdData(html) {
+var re =
+/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+var m;
+var contentType = /^(?:movie|film|tvseries|series|tvseason|tvepisode)$/i;
+
+while ((m = re.exec(html)) !== null) {
+var data = null;
+
+try {
+data = JSON.parse(String(m[1]).trim());
+} catch (error) {
+continue;
+}
+
+var stack = Array.isArray(data) ? data.slice() : [data];
+
+for (var i = 0; i < stack.length; i++) {
+var node = stack[i];
+
+if (!node || typeof node !== 'object') continue;
+
+if (Array.isArray(node['@graph'])) {
+stack = stack.concat(node['@graph']);
+continue;
+}
+
+var type = node['@type'];
+if (Array.isArray(type)) type = type[0];
+if (!type || !contentType.test(String(type))) continue;
+
+var name = node.name ? String(node.name) : '';
+if (!name) continue;
+
+return {
+type: String(type),
+name: name,
+description: node.description ? String(node.description) : ''
+};
+}
+}
+
+return null;
+}
+
 async function load(url, callback) {
 await ensureBase();
 url = normalizeSiteUrl(url);
@@ -1139,16 +1189,52 @@ if (base() !== fetchBase) {
 html = await get(url);
 }
 
+// ---- page-declared title / type / description (from the site) ----
+// 1) JSON-LD: exact canonical full title + Movie/TVSeries type.
+var ld = jsonLdData(html);
+
+// 2) Visible full title: <h1> plus the marker subtitle directly
+//    under it, e.g. "S01 [Ep 01-12 ORG Hindi Completed]".
 var heading =
-(html.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i) || [])[0];
+(html.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i) || [])[0] || '';
+var h1Title = cleanTitle(heading);
+var subtitle = '';
+
+if (heading && h1Title) {
+var afterHeading = html.slice(
+html.indexOf(heading) + heading.length
+);
+var subMatch = afterHeading.match(/^\s*<p\b[^>]*>([\s\S]*?)<\/p>/i);
+
+if (subMatch) {
+var subText = cleanTitle(subMatch[1]);
+
+// Only season/episode markers extend the title; language lines
+// like "[ORG Hindi]" must stay out of it.
+if (subText && /\b(s\d{1,2}\b|ep\b|episodes?\b|season\b)/i.test(subText)) {
+subtitle = subText;
+}
+}
+}
+
+var visibleTitle = subtitle ? h1Title + ' ' + subtitle : h1Title;
+var ogTitle = cleanTitle(meta(html, 'og:title') || '')
+.replace(/\s*[|–—-]+\s*MovieLinkBD\s*$/i, '')
+.trim();
 
 var title = cleanTitle(
-heading || meta(html, 'og:title')
+(ld && ld.name) || visibleTitle || ogTitle || h1Title
 );
 
 if (!title) {
 throw new Error('Could not find title');
 }
+
+var description =
+meta(html, 'description') ||
+meta(html, 'og:description') ||
+(ld && ld.description) ||
+'';
 
 var imageTag =
 (html.match(/<meta\b(?=[^>]*\bitemprop=["']image["'])[^>]*>/i) || [])[0];
@@ -1159,7 +1245,18 @@ attr(imageTag, 'content') || meta(html, 'og:image')
 var poster = tmdbSize(originalPoster, 'w500');
 var banner = tmdbSize(originalPoster, 'w1280');
 
-var itemType = kind(title, url);
+// Type: JSON-LD first (site-declared), then marker heuristics over
+// every title/description signal the page carries.
+var ldType = ld ? String(ld.type || '') : '';
+var itemType =
+/^(?:tvseries|series|tvseason|season|tvepisode)$/i.test(ldType)
+? 'series'
+: /^(?:movie|film|featuremovie)$/i.test(ldType)
+? 'movie'
+: kind(
+title + ' ' + subtitle + ' ' + ogTitle + ' ' + description,
+url
+);
 var episodes = itemType === 'movie'
 ? [
 new Episode({
@@ -1178,9 +1275,7 @@ posterUrl: poster,
 bannerUrl: banner,
 type: itemType,
 year: yearOf(title),
-description:
-meta(html, 'description') ||
-meta(html, 'og:description'),
+description: description,
 episodes: episodes
 });
 
