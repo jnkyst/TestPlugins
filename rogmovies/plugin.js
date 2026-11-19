@@ -6,12 +6,77 @@
 (function () {
   'use strict';
 
-  function base() {
-    // SkyStream injects the configured (or user-selected) base URL.
+  // The manifest points to the directory, not the movie site itself.
+  var siteBase = '';
+  var siteDirectory = '';
+  var siteExpiresAt = 0;
+  var siteLookup = null;
+
+  function directoryBase() {
     if (typeof manifest === 'undefined' || !manifest.baseUrl) {
-      throw new Error('Set baseUrl in plugin.json');
+      throw new Error('Set the directory baseUrl in plugin.json');
     }
-    return String(manifest.baseUrl).replace(/\/+$/, '');
+    var value = String(manifest.baseUrl).trim().replace(/\/+$/, '');
+    if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(value)) {
+      throw new Error('Directory baseUrl must be an HTTPS origin');
+    }
+    return value;
+  }
+
+  function base() {
+    if (!siteBase) throw new Error('RogMovies directory has not been resolved');
+    return siteBase;
+  }
+
+  function siteOrigin(url) {
+    var m = String(url || '').match(/^(https:\/\/(?:www\.)?rogmovies\.[a-z0-9.-]+(?::\d+)?)(?:[\/?#]|$)/i);
+    return m ? m[1].replace(/\/+$/, '') : '';
+  }
+
+  async function ensureSite() {
+    var directory = directoryBase();
+    if (siteBase && siteDirectory === directory && Date.now() < siteExpiresAt) return siteBase;
+    if (siteLookup && siteDirectory === directory) return siteLookup;
+    siteDirectory = directory;
+    siteLookup = (async function () {
+      var html = await get(directory + '/');
+      var anchors = html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+      var link = '';
+      for (var i = 0; i < anchors.length; i++) {
+        var opening = (anchors[i].match(/^<a\b[^>]*>/i) || [])[0] || '';
+        if (/bollywood\s+movies/i.test(text(anchors[i]) + ' ' + attr(opening, 'title'))) {
+          link = pageUrl(attr(opening, 'href'), directory + '/');
+          break;
+        }
+      }
+      if (!link) throw new Error('Bollywood Movies section not found in directory');
+      var target = siteOrigin(link);
+      if (!target) {
+        // Only follow the directory's own redirect page; do not follow arbitrary sites.
+        if (link.indexOf(directory + '/') !== 0) throw new Error('Unexpected Bollywood section host');
+        var redirectHtml = await get(link);
+        var metas = redirectHtml.match(/<meta\b[^>]*>/gi) || [];
+        for (var j = 0; j < metas.length && !target; j++) {
+          if (/^refresh$/i.test(attr(metas[j], 'http-equiv'))) {
+            var refresh = attr(metas[j], 'content').match(/(?:^|;)\s*url\s*=\s*["']?([^"';\s]+)/i);
+            if (refresh) target = siteOrigin(refresh[1]);
+          }
+        }
+        if (!target) {
+          var redirectAnchors = redirectHtml.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+          for (var k = 0; k < redirectAnchors.length && !target; k++) {
+            var tag = (redirectAnchors[k].match(/^<a\b[^>]*>/i) || [])[0] || '';
+            if (/click\s+here|redirect/i.test(text(redirectAnchors[k]))) target = siteOrigin(attr(tag, 'href'));
+          }
+        }
+      }
+      if (!target) throw new Error('Could not discover RogMovies URL from Bollywood Movies section');
+      siteBase = target;
+      siteExpiresAt = Date.now() + 5 * 60 * 1000;
+      return target;
+    })();
+    try { return await siteLookup; }
+    finally { siteLookup = null; }
   }
 
   function decode(value) {
@@ -226,6 +291,7 @@
     ];
 
     try {
+      await ensureSite();
       var results = await Promise.all(
         sections.map(async function (section) {
           try {
@@ -287,6 +353,7 @@
     }
 
     try {
+      await ensureSite();
       var term = String(query || '').trim();
 
       if (!term) {
@@ -469,9 +536,9 @@
   // =====================================
 
   async function load(url, callback) {
-    url = normalizeRogUrl(url);
-
     try {
+      await ensureSite();
+      url = normalizeRogUrl(url);
       if (!isSourcePage(url)) {
         throw new Error(
           'Not a page on the configured site'
@@ -730,9 +797,9 @@
   // =====================================
 
   async function loadStreams(url, callback) {
-    url = normalizeRogUrl(url);
-
     try {
+      await ensureSite();
+      url = normalizeRogUrl(url);
       var marker = '#skyepisode=';
       var markerIndex = url.indexOf(marker);
       var episodeLinks = null;
