@@ -29,6 +29,10 @@
 * FSLv2 / Pixel); a server that is dead or missing is skipped.
 * Rows are ordered 720P, then 1080P, then 2160P, and inside a
 * resolution HubCloud -> FSL -> FSLv2 -> Pixel.
+*
+* HubDrive packs count too: a pack page (hubdrive /packs/<id>) lists
+* one file per episode, so every episode is matched to its own file
+* and offers those servers next to its player stream.
 * Episodes that only offer a player page keep their HLS stream.
 *
 * ── PLAYBACK CHAINS (HDHub4u's own hosts) ─────────────────────
@@ -284,6 +288,11 @@ message: String(error && error.message ? error.message : error)
 // =====================================
 // SITE ORIGIN (baseUrl -> live mirror)
 // =====================================
+
+// episode URL (without the "#h=" marker) -> the episode's own HubDrive
+// file. Filled by load(), read by loadStreams(), so an episode still
+// finds its file even when the caller drops the marker.
+var EPISODE_FILES = {};
 
 var siteOrigin = '';   // resolved site origin, e.g. https://new16.hdhub4u.cl
 var originAt = 0;      // when it was resolved
@@ -982,6 +991,7 @@ var PLAY_HOST = /^https?:\/\/(?:www\.)?(?:playdrive|play4u)\.[a-z]+\//i;
 var STREAM_HOST = /^https?:\/\/(?:www\.)?hdstream4u\.[a-z]+\/file\//i;
 var DOWNLOAD_ONLY = /^https?:\/\/(?:www\.)?greenmotors\.[a-z]+\/\?id=/i;
 var FILE_HOST = /^https?:\/\/(?:www\.)?hubdrive\.[a-z]+\/(?:file|packs)\//i;
+var PACK_HOST = /^https?:\/\/(?:www\.)?hubdrive\.[a-z]+\/packs\//i;
 var DRIVE_HOST = /^https?:\/\/(?:www\.)?hubcloud\.[a-z]+\/drive\//i;
 var GENERATE_HOST = /^https?:\/\/gamerxyt\.com\/hubcloud\.php\?/i;
 
@@ -1410,8 +1420,75 @@ episode: block.number
 }));
 });
 
-// No per-episode links: the post only offers whole-season packs, so
-// label them as such instead of numbering them as episodes.
+// Every pack that is on the post is read once: the pages list one
+// file per episode, so each episode gets its own file link.
+var packIndex = {};
+
+if (packs.length) {
+var packPages = uniqueBy(packs, function (pack) { return pack.url; });
+
+for (var pi = 0; pi < packPages.length; pi++) {
+var packHtml;
+
+try {
+packHtml = await get(packPages[pi].url, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': origin() + '/'
+});
+} catch (error) {
+reportError('pack page failed: ' + String(error.message || error));
+continue;
+}
+
+packFiles(packHtml, packPages[pi].url).forEach(function (file) {
+var tag = episodeTag(file.name);
+
+if (!tag) return;
+
+var key = tag.season + ':' + tag.episode;
+
+if (packIndex[key]) return;
+
+packIndex[key] = file.url;
+});
+}
+}
+
+// Episodes found from the player get their file attached, so the
+// stream list shows HubCloud / FSL / FSLv2 / Pixel rows next to it.
+if (list.length) {
+list.forEach(function (episode) {
+var file = packIndex[episode.season + ':' + episode.episode];
+
+if (!file) return;
+
+EPISODE_FILES[String(episode.url).split('#')[0]] = file;
+
+if (String(episode.url).indexOf('#h=') < 0) {
+episode.url = episode.url + '#h=' + encodeURIComponent(file);
+}
+});
+}
+
+// No per-episode links at all: use the files inside the packs.
+if (!list.length) {
+Object.keys(packIndex).forEach(function (key) {
+var numbers = key.split(':');
+
+if (seen[key]) return;
+
+seen[key] = true;
+
+list.push(new Episode({
+name: 'Episode ' + numbers[1],
+url: packIndex[key],
+season: Number(numbers[0]),
+episode: Number(numbers[1])
+}));
+});
+}
+
+// Packs with no per-episode files: one row per pack.
 if (!list.length) {
 uniqueBy(packs, function (pack) { return pack.url; })
 .forEach(function (pack, index) {
@@ -1621,6 +1698,79 @@ return {
 url: 'https://pixeldrain.dev/api/file/' + id,
 size: formatSize(Number(info.size))
 };
+}
+
+// A pack page lists one file per episode (plus often a whole-season
+// archive), each with its own /file/<id> and size.
+function packFiles(html, page) {
+var source = String(html || '');
+var rows = source.match(
+/<div\b[^>]*class=["'][^"']*pack-clean-file[^"']*["'][\s\S]*?(?=<div\b[^>]*class=["'][^"']*pack-clean-file|<\/body)/gi
+) || [];
+var files = [];
+var seen = {};
+
+function push(name, size, href) {
+var url = pageUrl(href, page);
+
+if (!url || seen[url]) return;
+
+seen[url] = true;
+files.push({ name: text(name), size: text(size), url: url });
+}
+
+for (var i = 0; i < rows.length; i++) {
+push(
+(rows[i].match(/pack-clean-title[^>]*>([\s\S]*?)<\/div>/i) || [])[1] || '',
+(rows[i].match(/pack-clean-size[^>]*>([\s\S]*?)<\/div>/i) || [])[1] || '',
+(rows[i].match(/href=["']([^"']*\/file\/[^"']*)["']/i) || [])[1] || ''
+);
+}
+
+// Older layout: plain links, no rows.
+if (!files.length) {
+var anchors = source.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+
+for (var j = 0; j < anchors.length; j++) {
+var href = attr((anchors[j].match(/^<a\b[^>]*>/i) || [])[0], 'href');
+
+if (href && /\/file\/[A-Za-z0-9]+/i.test(href)) {
+push(text(anchors[j]), '', href);
+}
+}
+}
+
+return files;
+}
+
+// "Show.S03E05.Name.1080p.mkv" -> { season: 3, episode: 5 }
+function episodeTag(name) {
+var value = String(name || '');
+
+var match =
+value.match(/\bS(\d{1,2})\s*[.\-_ ]?\s*E(\d{1,3})\b/i) ||
+value.match(/\bSeason\s*(\d{1,2})\s*[.\-_ ]?\s*Episode\s*(\d{1,3})\b/i) ||
+value.match(/\bS(\d{1,2})\b[^]*?\bE(\d{1,3})\b/i);
+
+if (!match) return null;
+
+return { season: Number(match[1]), episode: Number(match[2]) };
+}
+
+function packFileFor(files, season, episode) {
+for (var i = 0; i < files.length; i++) {
+var tag = episodeTag(files[i].name);
+
+if (tag && tag.season === season && tag.episode === episode) {
+return files[i];
+}
+}
+
+return null;
+}
+
+function isArchive(name) {
+return /\.(?:zip|rar|7z|tar|gz)$/i.test(String(name || ''));
 }
 
 // hubdrive.* /file/<id>  ->  the hubcloud drive page for that file.
@@ -1945,12 +2095,83 @@ if (!stream.quality || stream.quality === 'Auto') stream.quality = quality;
 return streams;
 }
 
+// A pack page holds many files. With an episode hint only that
+// episode's file is opened; otherwise every playable file is used.
+async function resolvePack(url, quality, depth, season, episode) {
+var html = await get(url, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': origin() + '/'
+});
+
+var files = packFiles(html, url);
+
+if (!files.length) {
+throw new Error('HubDrive pack page lists no files');
+}
+
+var chosen = [];
+var hinted = season && episode ? packFileFor(files, season, episode) : null;
+
+if (hinted) {
+chosen = [hinted];
+} else {
+var playable = files.filter(function (file) { return !isArchive(file.name); });
+
+if (files.length === 1) {
+chosen = files;
+} else if (playable.length) {
+chosen = playable.slice(0, 3);
+} else {
+chosen = files.slice(0, 1);
+}
+}
+
+var streams = [];
+
+for (var i = 0; i < chosen.length; i++) {
+try {
+var rows = await resolveStreams(
+chosen[i].url,
+qualityOf(chosen[i].name) || quality,
+depth + 1
+);
+
+// Several files at once need to say which one they are.
+if (chosen.length > 1) {
+var tag = episodeTag(chosen[i].name);
+var suffix = tag
+? ' \u00b7 S' + (tag.season < 10 ? '0' : '') + tag.season +
+'E' + (tag.episode < 10 ? '0' : '') + tag.episode
+: '';
+
+rows.forEach(function (row) {
+if (suffix) row.source = row.source + suffix;
+});
+}
+
+streams = streams.concat(rows);
+} catch (error) {
+reportError('pack file failed: ' + String(error.message || error));
+}
+}
+
+if (!streams.length) {
+throw new Error('HubDrive pack has no playable file');
+}
+
+return streams;
+}
+
 // Resolve any URL this plugin understands into playable streams.
 async function resolveStreams(url, quality, depth) {
 if (depth > 4) return [];
 
 if (STREAM_HOST.test(url)) {
 return resolveHdStream(url);
+}
+
+if (PACK_HOST.test(url)) {
+return resolvePack(url, quality, depth, null, null);
 }
 
 if (FILE_HOST.test(url)) {
@@ -2051,6 +2272,22 @@ await ensureOrigin(false);
 
 url = String(url || '').trim();
 
+// An episode link may carry the episode's own HubDrive file after a
+// "#h=" marker (added by seriesEpisodes): the player stream and the
+// file servers are then both offered.
+var extraUrl = '';
+var hashAt = url.indexOf('#h=');
+
+if (hashAt >= 0) {
+try {
+extraUrl = decodeURIComponent(url.slice(hashAt + 3));
+} catch (error) {
+extraUrl = '';
+}
+
+url = url.slice(0, hashAt);
+}
+
 // Already a playable file.
 if (/^https?:\/\/[^\s]+\.(?:mp4|m3u8|mkv)(?:[?#].*)?$/i.test(url) ||
 /^https:\/\/[A-Za-z0-9-]+\.r2\.cloudflarestorage\.com\//i.test(url) ||
@@ -2065,6 +2302,22 @@ var collected = [];
 var blocked = 0;
 var failures = 0;
 var quality = '';
+
+// The marker may be gone but load() already matched this episode to a
+// file. Its chain runs at the same time as the player link, so the two
+// never wait for one another.
+if (!extraUrl && EPISODE_FILES[url]) {
+extraUrl = EPISODE_FILES[url];
+}
+
+var extraPending =
+extraUrl && extraUrl !== url && !BLOCKED_HOST.test(extraUrl)
+? resolveStreams(extraUrl, '', 0).then(null, function (error) {
+reportError('episode file failed: ' + String(error.message || error));
+
+return [];
+})
+: null;
 
 // A direct host page (episode link, file page, player page).
 if (!isSiteUrl(url)) {
@@ -2164,6 +2417,10 @@ if (/greenmotors\.[a-z]+\/\?id=|hdstream4u\.[a-z]+\/file\/|hubstream\.[a-z]+\/#/
 blocked++;
 }
 }
+}
+
+if (extraPending) {
+collected = collected.concat(await extraPending);
 }
 
 var seen = {};
