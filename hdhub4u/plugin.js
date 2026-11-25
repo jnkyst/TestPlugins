@@ -377,19 +377,14 @@ return /class=["'][^"']*\brecent-movies\b/i.test(String(html || '')) ||
 }
 
 // Ask HDHub4u's mirror service which host is live right now. All
-// endpoints are asked at once, so a slow or blocked one can no
-// longer hold up the home screen.
-async function resolveFromMirrorService() {
-var stamp = String(Math.floor(Date.now() / 3600000));
-
-var answers = await Promise.all(MIRROR_ENDPOINTS.map(async function (endpoint) {
-try {
-var body = await fetchUrl(
+// endpoints are asked at once and the first usable answer wins, so a
+// slow one neither delays the screen nor holds the call open.
+function askMirror(endpoint, stamp) {
+return fetchUrl(
 endpoint + '?v=' + stamp,
 { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
 TIMEOUT.mirror
-);
-
+).then(function (body) {
 var data = JSON.parse(body);
 
 // `c` is the full site URL, `h` only the host.
@@ -409,18 +404,40 @@ log('mirror service says ' + host);
 return 'https://' + host;
 }
 }
-} catch (error) {
+
+return '';
+}, function (error) {
 log('mirror endpoint failed: ' + endpoint + ' – ' + String(error.message || error));
+return '';
+});
 }
 
-return '';
-}));
+function resolveFromMirrorService() {
+var stamp = String(Math.floor(Date.now() / 3600000));
 
-for (var i = 0; i < answers.length; i++) {
-if (answers[i]) return answers[i];
+return new Promise(function (resolve) {
+var settled = false;
+var pending = MIRROR_ENDPOINTS.length;
+
+MIRROR_ENDPOINTS.forEach(function (endpoint) {
+askMirror(endpoint, stamp).then(function (answer) {
+pending--;
+
+if (settled) return;
+
+if (answer) {
+settled = true;
+resolve(answer);
+return;
 }
 
-return '';
+if (pending === 0) {
+settled = true;
+resolve('');
+}
+});
+});
+});
 }
 
 async function ensureOrigin(force) {
@@ -431,23 +448,11 @@ return siteOrigin;
 if (originPending) return originPending;
 
 originPending = (async function () {
-// 1. Does baseUrl itself serve the real site?
-try {
-var home = await fetchUrl(base() + '/', null, TIMEOUT.mirror);
-
-if (looksLikeListing(home)) {
-siteOrigin = base();
-originAt = Date.now();
-log('using baseUrl: ' + siteOrigin);
-return siteOrigin;
-}
-
-log('baseUrl ' + originHost(base()) + ' is a landing page, asking the mirror service');
-} catch (error) {
-log('baseUrl check failed: ' + String(error.message || error));
-}
-
-// 2. Ask HDHub4u's mirror service.
+// 1. HDHub4u's mirror service answers in a few hundred
+//    milliseconds, so it is asked first. Testing baseUrl first used
+//    to leave a doomed request to the landing page open – on some
+//    networks that request never finishes and the whole plugin call
+//    appears to hang after the result is printed.
 var resolved = '';
 
 try {
@@ -459,7 +464,24 @@ log('mirror lookup failed: ' + String(error.message || error));
 if (resolved) {
 siteOrigin = resolved;
 originAt = Date.now();
+log('origin = ' + siteOrigin);
 return siteOrigin;
+}
+
+// 2. Mirror service unavailable: does baseUrl itself serve the site?
+try {
+var home = await fetchUrl(base() + '/', null, TIMEOUT.mirror);
+
+if (looksLikeListing(home)) {
+siteOrigin = base();
+originAt = Date.now();
+log('using baseUrl: ' + siteOrigin);
+return siteOrigin;
+}
+
+log('baseUrl ' + originHost(base()) + ' is a landing page');
+} catch (error) {
+log('baseUrl check failed: ' + String(error.message || error));
 }
 
 // 3. Give up gracefully and keep using baseUrl.
@@ -927,12 +949,14 @@ fail(callback, error);
 // =====================================
 
 var PLAY_HOST = /^https?:\/\/(?:www\.)?(?:playdrive|play4u)\.[a-z]+\//i;
-var FILE_HOST = /^https?:\/\/(?:www\.)?hubdrive\.[a-z]+\/file\//i;
+var STREAM_HOST = /^https?:\/\/(?:www\.)?hdstream4u\.[a-z]+\/file\//i;
+var DOWNLOAD_ONLY = /^https?:\/\/(?:www\.)?greenmotors\.[a-z]+\/\?id=/i;
+var FILE_HOST = /^https?:\/\/(?:www\.)?hubdrive\.[a-z]+\/(?:file|packs)\//i;
 var DRIVE_HOST = /^https?:\/\/(?:www\.)?hubcloud\.[a-z]+\/drive\//i;
 var GENERATE_HOST = /^https?:\/\/gamerxyt\.com\/hubcloud\.php\?/i;
 
 // Download-only hosts this version recognises but cannot resolve.
-var BLOCKED_HOST = /^https?:\/\/(?:www\.)?(?:greenmotors\.[a-z]+|hdstream4u\.[a-z]+|hubstream\.[a-z]+|hubdrive\.[a-z]+\/(?!file\/)|vidaraa\.[a-z]+)\//i;
+var BLOCKED_HOST = /^https?:\/\/(?:www\.)?(?:greenmotors\.[a-z]+|hubstream\.[a-z]+|vidaraa\.[a-z]+)\//i;
 
 function pageUrl(raw, page) {
 raw = decode(raw || '').trim();
@@ -1018,6 +1042,76 @@ return true;
 // SERIES EPISODES
 // =====================================
 
+// Read a JSON object that follows a marker such as
+// window.__PA_SERIES__ = {...};  Brace matching (string aware) is
+// used instead of a lazy regex, so titles containing "};" cannot
+// truncate the data.
+function jsonObjectAfter(html, marker) {
+var source = String(html || '');
+var at = source.indexOf(marker);
+
+if (at < 0) return null;
+
+var start = source.indexOf('{', at);
+
+if (start < 0) return null;
+
+var depth = 0;
+var inString = false;
+var escaped = false;
+
+for (var i = start; i < source.length; i++) {
+var ch = source.charAt(i);
+
+if (inString) {
+if (escaped) escaped = false;
+else if (ch === '\\') escaped = true;
+else if (ch === '"') inString = false;
+} else if (ch === '"') {
+inString = true;
+} else if (ch === '{') {
+depth++;
+} else if (ch === '}') {
+depth--;
+
+if (depth === 0) {
+try {
+return JSON.parse(source.slice(start, i + 1));
+} catch (error) {
+reportError('JSON after ' + marker + ' could not be parsed: ' + String(error));
+return null;
+}
+}
+}
+}
+
+return null;
+}
+
+// Rewrite the season/episode numbers inside a known-good player URL,
+// whether it uses /s-05/ep-01 or ?s=5&ep=1.
+function withEpisodeNumbers(url, season, episode) {
+function pad(value) {
+return String(value).length < 2 ? '0' + value : String(value);
+}
+
+var value = String(url || '');
+var replaced = value.replace(
+/\/s-\d{1,2}\/ep-\d{1,3}/i,
+'/s-' + pad(season) + '/ep-' + pad(episode)
+);
+
+if (replaced !== value) return replaced;
+
+if (/[?&]ep=\d+/i.test(value)) {
+return value
+.replace(/([?&]s=)\d+/i, '$1' + season)
+.replace(/([?&]ep=)\d+/i, '$1' + episode);
+}
+
+return value;
+}
+
 function seasonOf(title, html) {
 var source = String(title || '') + ' ' + String(html || '');
 var match =
@@ -1036,7 +1130,158 @@ if (!match) return null;
 return { season: Number(match[1]), episode: Number(match[2]) };
 }
 
-function seriesEpisodes(html, postUrl, title) {
+// Many posts list one line per episode – "EPiSODE 1 | WATCH" – where
+// the watch button sits next to the download button. Grouping the
+// links per marker gives each episode its own playable source, even
+// when the player does not carry the show at all.
+function episodeBlocks(html, page) {
+var re = /(?:EPiSODE|Episode)\s*[:\-]?\s*(\d{1,3})\b/gi;
+var marks = [];
+var match;
+
+while ((match = re.exec(html)) !== null) {
+marks.push({ index: match.index, number: Number(match[1]) });
+}
+
+var blocks = [];
+
+marks.forEach(function (mark, i) {
+var end = i + 1 < marks.length ? marks[i + 1].index : html.length;
+var slice = html.slice(mark.index, end);
+
+var links = (slice.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [])
+.map(function (anchor) {
+return pageUrl(attr((anchor.match(/^<a\b[^>]*>/i) || [])[0], 'href'), page);
+})
+.filter(function (href) {
+return href && !isSiteUrl(href) &&
+(PLAY_HOST.test(href) || STREAM_HOST.test(href) ||
+FILE_HOST.test(href) || DOWNLOAD_ONLY.test(href));
+});
+
+if (links.length) {
+blocks.push({ number: mark.number, links: links });
+}
+});
+
+return blocks;
+}
+
+// Best available source for one episode: player first, then the
+// watch host, then downloads.
+function pickBlockLink(links) {
+var groups = [PLAY_HOST, STREAM_HOST, FILE_HOST, DOWNLOAD_ONLY];
+
+for (var g = 0; g < groups.length; g++) {
+for (var i = 0; i < links.length; i++) {
+if (groups[g].test(links[i])) return links[i];
+}
+}
+
+return '';
+}
+
+// play4u keeps the complete episode list for a show, while the post
+// page only links the episodes that have a watch mirror. Reading that
+// complete list is what stops episodes from going missing.
+async function play4uEpisodesFromPage(pageUrl, season, allowMismatch) {
+var html = await get(pageUrl, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': 'https://play4u.org/'
+});
+
+var map = jsonObjectAfter(html, '__PA_SERIES__');
+
+if (!map || !map.seasons) {
+log('play4u: no series map on ' + pageUrl);
+return [];
+}
+
+var seasons = map.seasons;
+var key = String(season);
+
+if (!seasons[key]) {
+var keys = Object.keys(seasons);
+
+// Only fall back to another season when the post does not name one
+// itself – otherwise the wrong episodes would be shown.
+if (!allowMismatch || keys.length !== 1) {
+log('play4u: season ' + season + ' not in map (' + keys.join(',') + ')');
+return [];
+}
+
+key = keys[0];
+}
+
+var episodes = (seasons[key] && seasons[key].episodes) || {};
+var numbers = Object.keys(episodes)
+.map(function (value) { return Number(value); })
+.filter(function (value) { return value > 0; })
+.sort(function (a, b) { return a - b; });
+
+var list = numbers.map(function (number) {
+var entry = episodes[String(number)] || {};
+var title = cleanTitle(entry.title || '');
+
+// Keep the readable title, capped so long descriptions do not
+// swamp the episode list.
+if (title.length > 60) title = title.slice(0, 57).trim() + '\u2026';
+
+return new Episode({
+name: 'Episode ' + number + (title ? ' \u00b7 ' + title : ''),
+url: withEpisodeNumbers(pageUrl, key, number),
+season: Number(key),
+episode: number
+});
+});
+
+log('play4u: season ' + key + ' has ' + list.length + ' episode(s)');
+
+return list;
+}
+
+// Slow path: go through the playdrive watch page to find the play4u
+// page for this show.
+async function play4uEpisodes(playUrl, season, allowMismatch) {
+var playHtml = await get(playUrl, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': origin() + '/'
+});
+
+var episodeUrl = play4uEpisodeFrom(playHtml, playUrl);
+
+if (!episodeUrl) {
+log('play4u: no episode page found for ' + playUrl);
+return [];
+}
+
+return play4uEpisodesFromPage(episodeUrl, season, allowMismatch);
+}
+
+// Fast path: the post page already links the show's IMDb id, and
+// play4u addresses shows by it – one request instead of two.
+async function play4uEpisodesByImdb(html, season, allowMismatch) {
+var match = String(html || '').match(/imdb\.com\/title\/(tt\d{5,10})/i);
+
+if (!match) return [];
+
+function pad(value) {
+return String(value).length < 2 ? '0' + value : String(value);
+}
+
+var pageUrl = 'https://play4u.org/series/' + match[1] +
+'/s-' + pad(season) + '/ep-01';
+
+try {
+return await play4uEpisodesFromPage(pageUrl, season, allowMismatch);
+} catch (error) {
+log('play4u: imdb route failed for ' + match[1] + ' – ' +
+String(error.message || error));
+return [];
+}
+}
+
+async function seriesEpisodes(html, postUrl, title) {
 var buttons = pageButtons(html, postUrl);
 var fallbackSeason = seasonOf(title, html);
 var watch = [];
@@ -1064,7 +1309,39 @@ packs.push(button);
 var list = [];
 var seen = {};
 
-// Per-episode watch links are the playable ones, so they win.
+// 1. Complete episode list from the player (covers episodes the
+//    post only offers as a download link).
+var complete = [];
+
+// Does the post itself say which season it covers?
+var seasonNamed = new RegExp(
+'\\bseason\\s*\\d{1,2}\\b|s\\d{1,2}\\s*[._-]?\\s*e\\d{1,3}|/s-\\d{1,2}/',
+'i'
+).test(String(title || '') + ' ' + String(postUrl || ''));
+
+try {
+complete = await play4uEpisodesByImdb(html, fallbackSeason, !seasonNamed);
+} catch (error) {
+reportError('play4u imdb lookup failed: ' + String(error.message || error));
+}
+
+if (!complete.length && watch.length) {
+try {
+complete = await play4uEpisodes(watch[0].url, watch[0].season, !seasonNamed);
+} catch (error) {
+reportError('play4u episode map failed: ' + String(error.message || error));
+}
+}
+
+complete.forEach(function (episode) {
+var key = episode.season + ':' + episode.episode;
+
+if (seen[key]) return;
+seen[key] = true;
+list.push(episode);
+});
+
+// 2. Anything the player did not list, taken from the post itself.
 watch
 .sort(function (a, b) {
 return a.season - b.season || a.episode - b.episode;
@@ -1080,6 +1357,26 @@ name: 'Episode ' + entry.episode,
 url: entry.url,
 season: entry.season,
 episode: entry.episode
+}));
+});
+
+// 3. Episodes listed one by one on the post itself.
+episodeBlocks(html, postUrl).forEach(function (block) {
+var key = fallbackSeason + ':' + block.number;
+
+if (seen[key]) return;
+
+var link = pickBlockLink(block.links);
+
+if (!link) return;
+
+seen[key] = true;
+
+list.push(new Episode({
+name: 'Episode ' + block.number,
+url: link,
+season: fallbackSeason,
+episode: block.number
 }));
 });
 
@@ -1110,7 +1407,137 @@ episode: 1
 }));
 }
 
-return list;
+return list.sort(function (a, b) {
+return a.season - b.season || a.episode - b.episode;
+});
+}
+
+// =====================================
+// HDSTREAM PLAYER (hds*  /file/<id>)
+// =====================================
+
+// The watch pages hide their player config inside a Dean Edwards
+// "p,a,c,k,e,d" packed script. Unpacking it is pure string work, so
+// it runs safely in the plugin sandbox – no remote script is ever
+// executed.
+function unpackJs(html) {
+var match = String(html || '').match(
+/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/
+);
+
+if (!match) return '';
+
+var payload = match[1].replace(/\\'/g, "'");
+var radix = Number(match[2]);
+var count = Number(match[3]);
+var words = match[4].split('|');
+var digits = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+function toRadix(value) {
+if (value === 0) return '0';
+
+var out = '';
+
+while (value > 0) {
+out = digits.charAt(value % radix) + out;
+value = Math.floor(value / radix);
+}
+
+return out;
+}
+
+for (var i = count - 1; i >= 0; i--) {
+if (!words[i]) continue;
+
+payload = payload.replace(
+new RegExp('\\b' + toRadix(i) + '\\b', 'g'),
+(function (word) {
+return function () { return word; };
+})(words[i])
+);
+}
+
+return payload;
+}
+
+// Player source list from an unpacked watch page: hls4 -> hls3 -> hls2,
+// in the same priority the page itself uses.
+function hdStreamSources(html) {
+var links = jsonObjectAfter(unpackJs(html), 'var links');
+
+if (!links) return [];
+
+return [links.hls4, links.hls3, links.hls2, links.hls1]
+.filter(function (value) { return value && typeof value === 'string'; });
+}
+
+// Best resolution advertised by an HLS master playlist.
+function playlistQuality(playlist) {
+var best = 0;
+var re = /RESOLUTION=(\d+)x(\d+)/gi;
+var match;
+
+while ((match = re.exec(String(playlist || ''))) !== null) {
+var height = Number(match[2]);
+
+if (height > best) best = height;
+}
+
+if (best >= 2000) return '2160p';
+if (best >= 1400) return '1440p';
+if (best >= 1000) return '1080p';
+if (best >= 700) return '720p';
+if (best >= 400) return '480p';
+
+return '';
+}
+
+async function resolveHdStream(pageUrl) {
+var html = await get(pageUrl, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': origin() + '/'
+});
+
+var sources = hdStreamSources(html);
+var pageOrigin = (String(pageUrl).match(/^https?:\/\/[^/]+/i) || [])[0] || '';
+
+if (!sources.length) {
+throw new Error('Watch page has no player source');
+}
+
+var target = '';
+
+for (var i = 0; i < sources.length; i++) {
+var value = String(sources[i]);
+
+if (value.charAt(0) === '/') value = pageOrigin + value;
+if (!/^https?:\/\//i.test(value)) continue;
+
+target = value;
+break;
+}
+
+if (!target) {
+throw new Error('Watch page source is not a URL');
+}
+
+var quality = '';
+
+try {
+quality = playlistQuality(await get(target, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': pageOrigin + '/'
+}));
+} catch (error) {
+reportError('HDStream playlist check failed: ' + String(error.message || error));
+}
+
+return [{
+url: target,
+quality: quality || 'Auto',
+source: 'HDStream \u00b7 HLS' + (quality ? '' : ' (auto)'),
+headers: { Referer: pageOrigin + '/' }
+}];
 }
 
 // =====================================
@@ -1370,6 +1797,10 @@ return streams;
 async function resolveStreams(url, quality, depth) {
 if (depth > 4) return [];
 
+if (STREAM_HOST.test(url)) {
+return resolveHdStream(url);
+}
+
 if (FILE_HOST.test(url)) {
 var next = await nextFromHubDrive(url);
 
@@ -1436,7 +1867,9 @@ season: 1,
 episode: 1
 })
 ]
-: seriesEpisodes(html, page, rawTitle);
+: await seriesEpisodes(html, page, rawTitle);
+
+log('load: ' + itemType + ' with ' + episodes.length + ' episode(s)');
 
 callback({
 success: true,
@@ -1507,6 +1940,7 @@ var html = await get(page);
 var buttons = uniqueBy(
 pageButtons(html, page).filter(function (button) {
 return PLAY_HOST.test(button.url) ||
+STREAM_HOST.test(button.url) ||
 FILE_HOST.test(button.url) ||
 DRIVE_HOST.test(button.url) ||
 GENERATE_HOST.test(button.url);
