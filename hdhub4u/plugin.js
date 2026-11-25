@@ -30,9 +30,8 @@
 * Rows are ordered 720P, then 1080P, then 2160P, and inside a
 * resolution FSL -> FSLv2 -> Pixel -> HubCloud.
 *
-* HUBDRIVE_ONLY (on by default) keeps the list to those file servers:
-* Play4u / HDStream player links are only used for titles that have no
-* HubDrive file at all, so nothing ends up with zero streams.
+* STREAM_SOURCE picks the family that is listed: the PlayDrive player
+* (720P / 1080P / Auto) by default, the HubDrive file servers, or both.
 *
 * HubDrive packs count too: a pack page (hubdrive /packs/<id>) lists
 * one file per episode, so every episode is matched to its own file
@@ -76,11 +75,11 @@ try {
 
 var SHORT_TITLES = true; // false = keep the full scene-style titles
 
-// HubDrive file servers only (FSL, FSLv2, Pixel, HubCloud).
-// A player/HLS stream is listed only when a title has no HubDrive link
-// at all, so nothing becomes unplayable.
-// false = list every source again (HLS included).
-var HUBDRIVE_ONLY = true;
+// Which sources the stream list shows:
+//   'playdrive' = the PlayDrive player only (720P / 1080P / Auto)
+//   'hubdrive'  = the HubDrive file servers only (FSL / FSLv2 / Pixel / HubCloud)
+//   'all'       = both
+var STREAM_SOURCE = 'playdrive';
 
 var HOME_LAYOUT = {
   latest: {
@@ -1434,7 +1433,10 @@ episode: block.number
 // file per episode, so each episode gets its own file link.
 var packIndex = {};
 
-if (packs.length) {
+var packsNeeded =
+packs.length && (STREAM_SOURCE !== 'playdrive' || !list.length);
+
+if (packsNeeded) {
 var packPages = uniqueBy(packs, function (pack) { return pack.url; });
 
 for (var pi = 0; pi < packPages.length; pi++) {
@@ -2141,7 +2143,7 @@ throw new Error('Player data could not be read');
 }
 
 var streams = (data && data.streams) || [];
-var item = (data && data.item) || {};
+var item = (data && (data.item || data.movie || data.series)) || {};
 var qualities = (item.qualities || [])
 .map(function (quality) { return quality && quality.label; })
 .filter(Boolean);
@@ -2225,19 +2227,30 @@ var html = await get(url, {
 'Referer': origin() + '/'
 });
 
-var episodeUrl = play4uEpisodeFrom(html, url);
-
-if (!episodeUrl) {
+// Movies (and some episodes) ship the whole player on the page itself:
+// the same sealed __PA_PLAY__ data the player site uses.
+var streams =
+String(html).indexOf('__PA_PLAY__') >= 0
+? await resolvePlay4u(url)
+: await resolvePlay4u(
+play4uEpisodeFrom(html, url) || (function () {
 throw new Error('play4u episode page not found');
-}
+})()
+);
 
-var streams = await resolvePlay4u(episodeUrl);
+// Every row already knows its resolution (720P / 1080P / AUTO), so the
+// quality printed on the post heading is not stamped over them.
 
 if (quality) {
 streams.forEach(function (stream) {
-if (!stream.quality || stream.quality === 'Auto') stream.quality = quality;
+if (!stream.quality) stream.quality = quality;
 });
 }
+
+// The app opens playdrive.vip links, so that is the name it shows.
+streams.forEach(function (stream) {
+stream.source = String(stream.source || '').replace(/^Play4u/, 'PlayDrive');
+});
 
 return streams;
 }
@@ -2453,7 +2466,9 @@ var quality = '';
 // The marker may be gone but load() already matched this episode to a
 // file. Its chain runs at the same time as the player link, so the two
 // never wait for one another.
-if (!extraUrl && EPISODE_FILES[url]) {
+if (STREAM_SOURCE === 'playdrive') {
+extraUrl = '';
+} else if (!extraUrl && EPISODE_FILES[url]) {
 extraUrl = EPISODE_FILES[url];
 }
 
@@ -2480,7 +2495,7 @@ message:
 }
 
 // The episode carries its own HubDrive file: that is the source.
-if (!(HUBDRIVE_ONLY && extraPending)) {
+if (!(STREAM_SOURCE === 'hubdrive' && extraPending)) {
 try {
 collected = await resolveStreams(url, '', 0);
 } catch (error) {
@@ -2503,13 +2518,29 @@ GENERATE_HOST.test(button.url);
 function (button) { return button.url; }
 );
 
+if (STREAM_SOURCE === 'hubdrive') {
 // File links beat watch links: with them the list is HubDrive only.
-if (HUBDRIVE_ONLY) {
 var fileButtons = buttons.filter(function (button) {
 return FILE_HOST.test(button.url);
 });
 
 if (fileButtons.length) buttons = fileButtons;
+} else if (STREAM_SOURCE === 'playdrive') {
+// PlayDrive links first; other players only when there is no
+// PlayDrive one, and a HubDrive file is never opened.
+var playDriveButtons = buttons.filter(function (button) {
+return PLAY_HOST.test(button.url);
+});
+
+var playerButtons = buttons.filter(function (button) {
+return PLAY_HOST.test(button.url) || STREAM_HOST.test(button.url);
+});
+
+buttons = playDriveButtons.length
+? playDriveButtons
+: playerButtons.length
+? playerButtons
+: buttons.filter(function (button) { return !FILE_HOST.test(button.url); });
 }
 
 if (buttons.length) {
@@ -2549,7 +2580,9 @@ limited.map(function (button) {
 return resolveStreams(button.url, button.quality || quality, 0).then(
 function (streams) {
 return (streams || []).map(function (stream) {
-if (!stream.quality || stream.quality === 'Auto') {
+// Only a row with no resolution of its own takes the button's
+// quality; an "Auto" row stays Auto on purpose.
+if (!stream.quality) {
 stream.quality = button.quality || quality || 'Auto';
 }
 
@@ -2605,14 +2638,34 @@ serverRank(a.source) - serverRank(b.source)
 );
 });
 
-// HubDrive only: the player/HLS rows are dropped as soon as a file
-// server answered, and kept only when there is no file at all.
-if (HUBDRIVE_ONLY) {
+if (STREAM_SOURCE === 'hubdrive') {
+// The player/HLS rows are dropped as soon as a file server answered,
+// and kept only when there is no file at all.
 var hubStreams = selected.filter(function (stream) {
 return isHubDriveSource(stream.source);
 });
 
 if (hubStreams.length) selected = hubStreams;
+} else if (STREAM_SOURCE === 'playdrive') {
+// HubDrive rows are removed, whatever produced them, and a PlayDrive
+// row wins over any other player on the same post.
+selected = selected.filter(function (stream) {
+return !isHubDriveSource(stream.source);
+});
+
+var playDriveStreams = selected.filter(function (stream) {
+return /^PlayDrive/i.test(String(stream.source || ''));
+});
+
+if (playDriveStreams.length) selected = playDriveStreams;
+
+selected = selected.map(function (stream) {
+// Every player row is the PlayDrive source, whichever host the
+// episode link itself pointed at.
+stream.source = String(stream.source || '').replace(/^Play4u/, 'PlayDrive');
+
+return stream;
+});
 }
 
 var streams = selected.map(function (stream) {
