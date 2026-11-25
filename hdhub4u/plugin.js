@@ -31,7 +31,13 @@
 * resolution FSL -> FSLv2 -> Pixel -> HubCloud.
 *
 * STREAM_SOURCE picks the family that is listed: the PlayDrive player
-* (720P / 1080P / Auto) by default, the HubDrive file servers, or both.
+* by default, the HubDrive file servers, or both.
+*
+* A player stream is listed as one "Auto" row pointing at the HLS
+* master: SkyStream then offers the resolutions itself (Quality tab)
+* and keeps every audio track, and the subtitle playlists found in
+* the master are attached to the stream. Splitting the master into
+* per-resolution rows loses both (set SPLIT_QUALITIES = true to try).
 *
 * HubDrive packs count too: a pack page (hubdrive /packs/<id>) lists
 * one file per episode, so every episode is matched to its own file
@@ -80,6 +86,14 @@ var SHORT_TITLES = true; // false = keep the full scene-style titles
 //   'hubdrive'  = the HubDrive file servers only (FSL / FSLv2 / Pixel / HubCloud)
 //   'all'       = both
 var STREAM_SOURCE = 'playdrive';
+
+// false = one "Auto" row per stream: SkyStream then reads the HLS
+//         master itself, so the player gets a Quality tab (Auto /
+//         1080P / 720P) and keeps every audio track and subtitle.
+// true  = one row per resolution. Those rows are plain video
+//         playlists, so the separate audio tracks and subtitles of
+//         the master are not available on them.
+var SPLIT_QUALITIES = false;
 
 var HOME_LAYOUT = {
   latest: {
@@ -628,7 +642,10 @@ return value === '4k' ? '2160p' : value === '2k' ? '1440p' : value;
 function displayQuality(label) {
 var value = String(label || '').trim();
 
-return value ? value.toUpperCase() : 'AUTO';
+if (!value) return 'Auto';
+if (/^auto$/i.test(value)) return 'Auto';
+
+return value.toUpperCase();
 }
 
 function qualityRank(label) {
@@ -2108,14 +2125,54 @@ variants.push({ url: url, quality: quality, width: width, height: height });
 return variants;
 }
 
-async function play4uVariants(masterUrl, headers) {
+// #EXT-X-MEDIA lines: the audio tracks and subtitle playlists of a
+// master. They live only here, so a variant URL alone never has them.
+function hlsMedia(body, masterUrl) {
+var lines = String(body || '').split(/\r?\n/);
+var audio = [];
+var subtitles = [];
+var seenSub = {};
+
+for (var i = 0; i < lines.length; i++) {
+var line = lines[i];
+
+if (!/^#EXT-X-MEDIA:/i.test(line)) continue;
+
+var type = ((line.match(/TYPE=([A-Za-z_]+)/) || [])[1] || '').toUpperCase();
+var name = (line.match(/NAME="([^"]*)"/) || [])[1] || '';
+var lang = (line.match(/LANGUAGE="([^"]*)"/) || [])[1] || '';
+var uri = (line.match(/URI="([^"]*)"/) || [])[1] || '';
+
+if (type === 'AUDIO') {
+audio.push({ name: name, lang: lang });
+continue;
+}
+
+if (type !== 'SUBTITLES' || !uri) continue;
+
+var url = joinUrl(masterUrl, uri);
+
+if (!url || seenSub[url]) continue;
+
+seenSub[url] = true;
+subtitles.push({ url: url, label: name || lang || 'Subtitles', lang: lang });
+}
+
+return { audio: audio, subtitles: subtitles };
+}
+
+async function play4uPlaylist(masterUrl, headers) {
 try {
 var body = await fetchUrl(masterUrl, headers, TIMEOUT.page);
 
-return hlsVariants(body, masterUrl);
+return {
+variants: hlsVariants(body, masterUrl),
+media: hlsMedia(body, masterUrl)
+};
 } catch (error) {
-log('play4u: variant list failed – ' + String(error.message || error));
-return [];
+log('play4u: playlist read failed – ' + String(error.message || error));
+
+return { variants: [], media: { audio: [], subtitles: [] } };
 }
 }
 
@@ -2167,42 +2224,50 @@ if (!/^https?:\/\//i.test(master)) return;
 if (masters.indexOf(master) < 0) masters.push(master);
 });
 
-// Every master playlist is read once: it names the real resolutions.
+// Every master playlist is read once: it names the resolutions, the
+// audio tracks and the subtitle playlists.
 var offers = await Promise.all(
-masters.map(function (master) { return play4uVariants(master, streamHeaders); })
+masters.map(function (master) { return play4uPlaylist(master, streamHeaders); })
 );
 
 masters.forEach(function (master, index) {
-var variants = offers[index] || [];
+var offer = offers[index] || { variants: [], media: { audio: [], subtitles: [] } };
+var variants = offer.variants || [];
+var media = offer.media || { audio: [], subtitles: [] };
 var known = variants
 .map(function (variant) { return variant.quality; })
 .filter(Boolean);
 
-// Adaptive first (the player picks the bitrate), then one row per
-// resolution the playlist really offers: 720P, 1080P, ...
+// The master is what makes the player show its Quality tab with the
+// audio tracks and subtitles intact, so it is the row that is listed.
 out.push({
 url: master,
 quality: 'Auto',
 source:
-'Play4u · HLS (adaptive' +
-(known.length ? ' ' + known.join('/').toUpperCase() : '') +
-')',
-headers: streamHeaders
+'Play4u · HLS' +
+(media.audio.length ? ' \u00b7 ' + media.audio.length + ' audio' : '') +
+(media.subtitles.length ? ' \u00b7 ' + media.subtitles.length + ' sub' : ''),
+headers: streamHeaders,
+subtitles: media.subtitles
 });
 
+// Optional: one row per resolution instead. Those are plain video
+// playlists, so audio tracks and subtitles do not come with them.
+if (SPLIT_QUALITIES) {
 variants.forEach(function (variant) {
 if (!variant.quality) return;
 
 out.push({
 url: variant.url,
 quality: variant.quality,
-source: 'Play4u · HLS',
+source: 'Play4u · HLS' + (known.length ? ' (' + known.join('/').toUpperCase() + ')' : ''),
 headers: streamHeaders
 });
 });
+}
 
 // Could not read the playlist: keep the qualities the page claims.
-if (!variants.length && qualities.length) {
+if (!variants.length && !out.length && qualities.length) {
 qualities.forEach(function (quality) {
 out.push({
 url: master,
@@ -2673,7 +2738,8 @@ return new StreamResult({
 url: stream.url,
 source: stream.source,
 quality: displayQuality(stream.quality),
-headers: stream.headers
+headers: stream.headers,
+subtitles: stream.subtitles
 });
 });
 
