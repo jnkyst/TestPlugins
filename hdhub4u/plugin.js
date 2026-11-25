@@ -1,1457 +1,1633 @@
-(function() {
-    const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
-    const TMDB_API_URL = "https://api.themoviedb.org/3";
-    const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p";
-    const runtimeManifest = (typeof manifest !== "undefined" && manifest) ? manifest : {};
-    let MAIN_URL = String(runtimeManifest.baseUrl || "https://hdhub4u.glass").replace(/\/+$/, "");
-    let domainResolved = false;
-
-    async function resolveBaseUrl() {
-        if (domainResolved) return;
-        domainResolved = true;
-        try {
-            const res = await http_get("https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json", { headers: { "User-Agent": "Mozilla/5.0" } });
-            const json = JSON.parse(res.body || "{}");
-            if (json.HDHUB4u) {
-                MAIN_URL = String(json.HDHUB4u).replace(/\/+$/, "");
-                HEADERS["Referer"] = `${MAIN_URL}/`;
-            }
-        } catch (_) {}
-    }
-    
-    const HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-        "Cookie": "xla=s4t",
-        "Referer": `${MAIN_URL}/`
-    };
-
-    function cleanTitle(title) {
-        let name = (title || "").replace(/\.[a-zA-Z0-9]{2,4}$/, "");
-        const normalized = name.replace(/WEB[-_. ]?DL/gi, "WEB-DL").replace(/WEB[-_. ]?RIP/gi, "WEBRIP").replace(/H[ .]?265/gi, "H265").replace(/H[ .]?264/gi, "H264").replace(/DDP[ .]?([0-9]\.[0-9])/gi, "DDP$1");
-        const parts = normalized.split(/[\s_.]/);
-        const sourceTags = new Set(["WEB-DL", "WEBRIP", "BLURAY", "HDRIP", "DVDRIP", "HDTV", "CAM", "TS", "BRRIP", "BDRIP"]);
-        const codecTags = new Set(["H264", "H265", "X264", "X265", "HEVC", "AVC"]);
-        const audioTags = ["AAC", "AC3", "DTS", "MP3", "FLAC", "DD", "DDP", "EAC3"];
-        const audioExtras = new Set(["ATMOS"]);
-        const hdrTags = new Set(["SDR", "HDR", "HDR10", "HDR10+", "DV", "DOLBYVISION"]);
-        
-        const filtered = parts.map((part) => {
-            const p = part.toUpperCase();
-            if (sourceTags.has(p)) return p;
-            if (codecTags.has(p)) return p;
-            if (audioTags.some((tag) => p.startsWith(tag))) return p;
-            if (audioExtras.has(p)) return p;
-            if (hdrTags.has(p)) return p === "DOLBYVISION" || p === "DV" ? "DOLBYVISION" : p;
-            if (p === "NF" || p === "CR") return p;
-            return null;
-        }).filter(Boolean);
-        
-        return [...new Set(filtered)].join(" ");
-    }
-
-    function safeJsonParse(value, fallback = null) {
-        if (value && typeof value === "object") return value;
-        try {
-            return JSON.parse(String(value || ""));
-        } catch (_) {
-            return fallback;
-        }
-    }
-
-    async function fetchJson(url, headers = {}, fallback = {}) {
-        try {
-            const response = await http_get(url, { headers: headers });
-            return safeJsonParse(response.body, fallback);
-        } catch (_) {
-            return fallback;
-        }
-    }
-
-    function tmdbApi(path, query = "") {
-        const cleanPath = String(path || "").replace(/^\/+/, "");
-        const prefix = `${TMDB_API_URL}/${cleanPath}?api_key=${TMDB_API_KEY}`;
-        return query ? `${prefix}&${query}` : prefix;
-    }
-
-    function normalizeAbsoluteUrl(url) {
-        const value = String(url || "").trim();
-        if (!value) return "";
-        try {
-            return new URL(value, MAIN_URL).href;
-        } catch (_) {
-            return value;
-        }
-    }
-
-    function makeTrailer(url) {
-        const value = normalizeAbsoluteUrl(url);
-        if (!value) return null;
-        try {
-            if (typeof Trailer !== "undefined") return new Trailer({ url: value });
-        } catch (_) {}
-        return { url: value };
-    }
-
-    function extractImdbId(value) {
-        return String(value || "").match(/tt\d+/i)?.[0] || "";
-    }
-
-    function buildSyncData(tmdbId, imdbId) {
-        const syncData = {};
-        if (tmdbId) syncData.tmdb = String(tmdbId);
-        if (imdbId) syncData.imdb = imdbId;
-        return syncData;
-    }
-
-    function parseRecommendationCard(el) {
-        const a = el.querySelector("figcaption a") || el.querySelector("figure a") || el.querySelector("a");
-        const figureLink = el.querySelector("figure a") || a;
-        if (!a || !figureLink) return null;
-        const titleText = (a.textContent || "").replace(/\|.*$/, "").trim();
-        const href = normalizeSiteUrl(figureLink.getAttribute("href"));
-        const poster = el.querySelector("figure img")?.getAttribute("src") || el.querySelector("img")?.getAttribute("src");
-        if (!titleText || !href) return null;
-        const isSeries = inferIsSeries(titleText, href, "");
-        return new MultimediaItem({
-            title: titleText,
-            url: href,
-            posterUrl: poster,
-            type: isSeries ? "series" : "movie",
-            contentType: isSeries ? "series" : "movie"
-        });
-    }
-
-    function parseRecommendations(doc, currentUrl) {
-        const seen = new Set([normalizeSiteUrl(currentUrl)]);
-        const cards = Array.from(doc.querySelectorAll(".related-posts li.thumb, .related-post li.thumb, .recent-movies > li.thumb, .widget-recent .thumb, div.thumb, li.thumb"));
-        const out = [];
-        for (const card of cards) {
-            const item = parseRecommendationCard(card);
-            if (!item || seen.has(item.url)) continue;
-            seen.add(item.url);
-            out.push(item);
-            if (out.length >= 12) break;
-        }
-        return out;
-    }
-
-    function inferIsSeries(title, url, categories) {
-        const combined = `${title || ""} ${categories || ""} ${url || ""}`.toLowerCase();
-        return /all-episodes|web[- ]series|tv[- ]series|season\s*\d+|\/season-|\/all-episodes|\/series\//i.test(combined);
-    }
-
-    function normalizeSiteUrl(url) {
-        const value = String(url || "");
-        if (!value) return value;
-        try {
-            const parsed = new URL(value, MAIN_URL);
-            if (/hdhub4u\./i.test(parsed.hostname) && !parsed.href.startsWith(MAIN_URL)) {
-                return `${MAIN_URL}${parsed.pathname}${parsed.search}${parsed.hash}`;
-            }
-            return parsed.href;
-        } catch (_) {
-            return value;
-        }
-    }
-
-    async function withTimeout(promise, ms, fallback) {
-        let timer = null;
-        try {
-            return await Promise.race([
-                promise,
-                new Promise(resolve => {
-                    timer = setTimeout(() => resolve(fallback), ms);
-                })
-            ]);
-        } finally {
-            if (timer) clearTimeout(timer);
-        }
-    }
-
-    async function mapLimit(items, limit, worker) {
-        const list = Array.isArray(items) ? items : [];
-        const max = Math.max(1, Number(limit || 1));
-        const results = new Array(list.length);
-        let index = 0;
-        async function run() {
-            while (index < list.length) {
-                const current = index++;
-                try {
-                    results[current] = await worker(list[current], current);
-                } catch (_) {
-                    results[current] = [];
-                }
-            }
-        }
-        await Promise.all(Array.from({ length: Math.min(max, list.length) }, run));
-        return results;
-    }
-
-    async function fetchMany(requests) {
-        const normalized = requests.map(req => ({
-            url: req.url,
-            headers: req.headers || HEADERS,
-            meta: req.meta
-        }));
-
-        if (typeof http_parallel === "function") {
-            try {
-                const responses = await http_parallel(normalized.map(req => ({ url: req.url, headers: req.headers })));
-                if (Array.isArray(responses)) {
-                    return responses.map((response, index) => ({ ...(response || {}), meta: normalized[index].meta }));
-                }
-            } catch (_) {}
-        }
-
-        return await Promise.all(normalized.map(async req => {
-            try {
-                const response = await http_get(req.url, { headers: req.headers });
-                return { ...(response || {}), meta: req.meta };
-            } catch (_) {
-                return { body: "", meta: req.meta };
-            }
-        }));
-    }
-
-    async function searchOnSite(query) {
-        try {
-            const urls = [
-                `${MAIN_URL}/search/${encodeURIComponent(query)}`,
-                `${MAIN_URL}/?s=${encodeURIComponent(query)}`
-            ];
-            for (const url of urls) {
-                try {
-                    const res = await http_get(url, { headers: HEADERS });
-                    if (!res || !res.body) continue;
-                    const doc = await parseHtml(res.body);
-                    const items = Array.from(doc.querySelectorAll('.recent-movies > li.thumb, li.thumb, .movie-card')).map(el => {
-                        const a = el.querySelector('figcaption a') || el.querySelector('a');
-                        if (!a) return null;
-                        const titleText = a.textContent.trim();
-                        let href = el.querySelector('figure a')?.getAttribute('href') || a.getAttribute('href');
-                        if (href && href.startsWith("/")) href = `${MAIN_URL}${href}`;
-                        href = normalizeSiteUrl(href);
-                        const poster = el.querySelector('figure img')?.getAttribute('src') || el.querySelector('img')?.getAttribute('src');
-                        const isSeries = inferIsSeries(titleText, href, "");
-                        return new MultimediaItem({
-                            title: titleText.replace(/\|.*$/, "").trim(),
-                            url: href,
-                            posterUrl: poster,
-                            type: isSeries ? "series" : "movie",
-                            contentType: isSeries ? "series" : "movie"
-                        });
-                    }).filter(Boolean);
-                    if (items.length > 0) return items;
-                } catch (_) {}
-            }
-            return [];
-        } catch (_) {
-            return [];
-        }
-    }
-
-    async function search(query, cb) {
-        try {
-            await resolveBaseUrl();
-            const today = (new Date()).toISOString().split("T")[0];
-            const searchUrl = `https://search.pingora.fyi/collections/post/documents/search?q=${encodeURIComponent(query)}&query_by=post_title,category,stars,director,imdb_id&query_by_weights=4,2,2,2,4&sort_by=sort_by_date:desc&limit=15&highlight_fields=none&use_cache=true&page=1&analytics_tag=${today}`;
-
-            const requestHeaders = {
-                ...HEADERS,
-                "Referer": `${MAIN_URL}/`,
-                "Origin": MAIN_URL
-            };
-
-            const data = await fetchJson(searchUrl, requestHeaders, {});
-
-            if (data && data.hits && data.hits.length > 0) {
-                const results = data.hits.map((hit) => {
-                    const doc = hit.document;
-                    if (!doc) return null;
-                    const title = doc.post_title || "Unknown";
-                    const yearMatch = title.match(/\((\d{4})\)|\b(\d{4})\b/);
-                    const year = yearMatch ? parseInt(yearMatch[1] || yearMatch[2]) : null;
-                    let url = doc.permalink;
-                    if (url && url.startsWith("/")) {
-                        url = `${MAIN_URL}${url}`;
-                    } else if (url && !url.startsWith("http")) {
-                        url = `${MAIN_URL}/${url}`;
-                    }
-                    url = normalizeSiteUrl(url);
-                    
-                    const categories = Array.isArray(doc.category) ? doc.category.join(" ") : (doc.category || "");
-                    const isSeries = inferIsSeries(title, url, categories);
-
-                    return new MultimediaItem({
-                        title: title.replace(/\|.*$/, "").trim(),
-                        url: url,
-                        posterUrl: doc.post_thumbnail,
-                        year: year,
-                        type: isSeries ? "series" : "movie",
-                        contentType: isSeries ? "series" : "movie"
-                    });
-                }).filter(Boolean);
-
-                return cb({ success: true, data: results });
-            }
-
-            const scraped = await searchOnSite(query);
-            cb({ success: true, data: scraped });
-        } catch (e) {
-            cb({ success: false, error: e.message });
-        }
-    }
-
-    async function getHomeFromSite() {
-        const sections = [
-            { name: "Latest", path: "" },
-            { name: "Bollywood", path: "/category/bollywood-movies/" },
-            { name: "Hollywood", path: "/category/hollywood-movies/" },
-            { name: "Hindi Dubbed", path: "/category/hindi-dubbed/" },
-            { name: "South Hindi", path: "/category/south-hindi-movies/" },
-            { name: "Web Series", path: "/category/web-series/" }
-        ];
-
-        const base = MAIN_URL;
-        const results = await Promise.all(sections.map(async (section) => {
-            try {
-                const url = section.path ? `${base}${section.path}page/1/` : `${base}/page/1/`;
-                const res = await http_get(url, { headers: HEADERS });
-                const doc = await parseHtml(res.body);
-                const items = Array.from(doc.querySelectorAll('.recent-movies > li.thumb')).map(el => {
-                    const a = el.querySelector('figcaption a');
-                    if (!a) return null;
-                    const titleText = a.textContent.trim();
-                    let href = el.querySelector('figure a')?.getAttribute('href');
-                    if (href && href.startsWith("/")) href = `${base}${href}`;
-                    href = normalizeSiteUrl(href);
-                    const poster = el.querySelector('figure img')?.getAttribute('src');
-                    const isSeries = inferIsSeries(titleText, href, "");
-                    return new MultimediaItem({
-                        title: titleText.replace(/\|.*$/, "").trim(),
-                        url: href,
-                        posterUrl: poster,
-                        type: isSeries ? "series" : "movie",
-                        contentType: isSeries ? "series" : "movie"
-                    });
-                }).filter(Boolean);
-                return { name: section.name, items };
-            } catch (err) {
-                return { name: section.name, items: [] };
-            }
-        }));
-        const result = {};
-        for (const { name, items } of results) {
-            result[name] = items;
-        }
-        return result;
-    }
-
-    async function getTMDBLogoUrl(tmdbId, mediaType) {
-        try {
-            const endpoint = mediaType === "tv" ? "tv" : "movie";
-            const url = tmdbApi(`${endpoint}/${tmdbId}`, "append_to_response=external_ids");
-            const data = await fetchJson(url, { "Accept": "application/json" }, {});
-            const imdbId = data.external_ids?.imdb_id;
-            return imdbId ? `https://live.metahub.space/logo/medium/${imdbId}/img` : null;
-        } catch (_) {
-            return null;
-        }
-    }
-
-    async function enrichItemWithTMDB(item) {
-        const title = item.title || "";
-        const yearMatch = title.match(/\((\d{4})\)|\b(\d{4})\b/);
-        const year = yearMatch ? parseInt(yearMatch[1] || yearMatch[2]) : null;
-        const cleanT = normalizeLookupTitle(title, item.type !== "series");
-        try {
-            const tmdbId = await searchTMDBIdByTitle(cleanT || title, item.type !== "series", year);
-            if (tmdbId) {
-                const logoUrl = await getTMDBLogoUrl(tmdbId, item.type === "series" ? "tv" : "movie");
-                if (logoUrl) item.logoUrl = logoUrl;
-            }
-        } catch (_) {}
-        return item;
-    }
-
-    async function getHome(cb) {
-        try {
-            await resolveBaseUrl();
-            const scraped = await getHomeFromSite();
-            if (scraped && scraped["Latest"] && scraped["Latest"].length > 0) {
-                const trendingRaw = scraped["Latest"].slice(0, 8);
-                scraped["Trending"] = await Promise.all(trendingRaw.map(item => enrichItemWithTMDB(item)));
-                return cb({ success: true, data: scraped });
-            }
-
-            const today = (new Date()).toISOString().split("T")[0];
-            const searchUrl = `https://search.pingora.fyi/collections/post/documents/search?q=&query_by=post_title,category,stars,director,imdb_id&query_by_weights=4,2,2,2,4&sort_by=sort_by_date:desc&limit=50&highlight_fields=none&use_cache=true&page=1&analytics_tag=${today}`;
-
-            const requestHeaders = {
-                ...HEADERS,
-                "Referer": `${MAIN_URL}/`,
-                "Origin": MAIN_URL
-            };
-            const data = await fetchJson(searchUrl, requestHeaders, {});
-
-            if (data && data.hits && data.hits.length > 0) {
-                const categoryMap = {
-                    "BollyWood": "Bollywood",
-                    "HollyWood": "Hollywood",
-                    "Hindi Dubbed": "Hindi Dubbed",
-                    "South Hindi Movies": "South Hindi",
-                    "WEB-Series": "Web Series",
-                    "Adult": "Adult"
-                };
-
-                const sections = { "Latest": [], "Trending": [] };
-                const TRENDING_COUNT = 8;
-                const hits = data.hits;
-
-                async function enrichWithTMDB(doc) {
-                    const title = doc.post_title || "Unknown";
-                    let url = doc.permalink;
-                    if (url && url.startsWith("/")) url = `${MAIN_URL}${url}`;
-                    else if (url && !url.startsWith("http")) url = `${MAIN_URL}/${url}`;
-                    url = normalizeSiteUrl(url);
-                    const categories = Array.isArray(doc.category) ? doc.category : [doc.category || ""];
-                    const isSeries = inferIsSeries(title, url, categories.join(" "));
-                    const yearMatch = title.match(/\((\d{4})\)|\b(\d{4})\b/);
-                    const year = yearMatch ? parseInt(yearMatch[1] || yearMatch[2]) : null;
-                    let bannerUrl, logoUrl;
-                    try {
-                        const tmdbId = await searchTMDBIdByTitle(title, !isSeries, year);
-                        if (tmdbId) {
-                            const details = await getTMDBDetails(tmdbId, isSeries ? "tv" : "movie");
-                            if (details) {
-                                bannerUrl = details.backdrop;
-                                logoUrl = details.logoUrl;
-                            }
-                        }
-                    } catch (_) {}
-                    return new MultimediaItem({
-                        title: title.replace(/\|.*$/, "").trim(),
-                        url: url,
-                        posterUrl: doc.post_thumbnail,
-                        bannerUrl: bannerUrl,
-                        logoUrl: logoUrl,
-                        type: isSeries ? "series" : "movie",
-                        contentType: isSeries ? "series" : "movie"
-                    });
-                }
-
-                const trendingItems = await Promise.all(
-                    hits.slice(0, TRENDING_COUNT).map(h => h.document ? enrichWithTMDB(h.document) : Promise.resolve(null))
-                );
-                sections["Trending"] = trendingItems.filter(Boolean);
-
-                for (let i = TRENDING_COUNT; i < hits.length; i++) {
-                    const doc = hits[i].document;
-                    if (!doc) continue;
-                    const title = doc.post_title || "Unknown";
-                    let url = doc.permalink;
-                    if (url && url.startsWith("/")) url = `${MAIN_URL}${url}`;
-                    else if (url && !url.startsWith("http")) url = `${MAIN_URL}/${url}`;
-                    url = normalizeSiteUrl(url);
-                    const categories = Array.isArray(doc.category) ? doc.category : [doc.category || ""];
-                    const isSeries = inferIsSeries(title, url, categories.join(" "));
-                    const item = new MultimediaItem({
-                        title: title.replace(/\|.*$/, "").trim(),
-                        url: url,
-                        posterUrl: doc.post_thumbnail,
-                        type: isSeries ? "series" : "movie",
-                        contentType: isSeries ? "series" : "movie"
-                    });
-                    sections["Latest"].push(item);
-                    categories.forEach(cat => {
-                        const sectionName = categoryMap[cat];
-                        if (sectionName) {
-                            if (!sections[sectionName]) sections[sectionName] = [];
-                            sections[sectionName].push(item);
-                        }
-                    });
-                }
-
-                return cb({ success: true, data: sections });
-            }
-
-            cb({ success: true, data: scraped || {} });
-        } catch (e) {
-            cb({ success: false, error: e.message });
-        }
-    }
-
-    async function getTMDBDetails(tmdbId, mediaType) {
-        const endpoint = mediaType === "tv" ? "tv" : "movie";
-        const url = tmdbApi(`${endpoint}/${tmdbId}`, "append_to_response=external_ids,credits");
-        const data = await fetchJson(url, { "Accept": "application/json" }, {});
-        
-        const actors = (data.credits?.cast || []).slice(0, 15).map(c => new Actor({
-            name: c.name,
-            image: c.profile_path ? `https://image.tmdb.org/t/p/w500${c.profile_path}` : null,
-            role: c.character
-        }));
-
-        return {
-            title: mediaType === "tv" ? data.name : data.title,
-            year: (mediaType === "tv" ? data.first_air_date : data.release_date)?.split("-")[0],
-            description: data.overview,
-            poster: data.poster_path ? `${TMDB_IMAGE_BASE}/w500${data.poster_path}` : null,
-            backdrop: data.backdrop_path ? `${TMDB_IMAGE_BASE}/original${data.backdrop_path}` : null,
-            genres: data.genres ? data.genres.map(g => g.name) : [],
-            rating: data.vote_average,
-            imdbId: data.external_ids?.imdb_id,
-            logoUrl: data.external_ids?.imdb_id ? `https://live.metahub.space/logo/medium/${data.external_ids.imdb_id}/img` : null,
-            cast: actors
-        };
-    }
-
-    async function getTMDBSeasonEpisodes(tmdbId, seasonNumber) {
-        try {
-            const url = tmdbApi(`tv/${tmdbId}/season/${seasonNumber}`);
-            const data = await fetchJson(url, { "Accept": "application/json" }, {});
-            return (data.episodes || []).reduce((acc, ep) => {
-                acc[ep.episode_number] = {
-                    name: ep.name,
-                    description: ep.overview,
-                    posterUrl: ep.still_path ? `${TMDB_IMAGE_BASE}/w500${ep.still_path}` : null,
-                    airDate: ep.air_date || null,
-                    rating: Number.isFinite(Number(ep.vote_average)) && Number(ep.vote_average) > 0 ? Number(ep.vote_average) : null
-                };
-                return acc;
-            }, {});
-        } catch (e) {
-            return {};
-        }
-    }
-
-    function extractYearFromTitle(title) {
-        const match = (title || "").match(/\b(19|20)\d{2}\b/);
-        return match ? parseInt(match[0], 10) : null;
-    }
-
-    function normalizeLookupTitle(title, isMovie) {
-        let clean = (title || "").replace(/\.[a-zA-Z0-9]{2,4}$/, "");
-        clean = clean.replace(/\|.*$/, "");
-        clean = clean.replace(/\[[^\]]*]/g, " ");
-        clean = clean.replace(/\((?:Season|S)\s*\d+[^)]*\)/gi, " ");
-        clean = clean.replace(/\b(?:Season|S)\s*\d+\b/gi, " ");
-        clean = clean.replace(/\b(?:EP|Episode)\s*\d+\b/gi, " ");
-        clean = clean.replace(/\b(?:WEB[- ]DL|WEB[- ]RIP|HDRIP|BLURAY|HDTC|HQ[- ]HDTC|DS4K|4K|2160p|1080p|720p|480p|10Bit|HEVC|x264|x265|HD|Dual Audio|Multi Audio|Hindi|English|Tamil|Telugu|Korean|Japanese|Spanish|PrimeVideo|Series|Movie|ALL)\b/gi, " ");
-        if (!isMovie) {
-            clean = clean.replace(/\b(?:Added|Episodes?)\b/gi, " ");
-        }
-        clean = clean.replace(/&/g, " ");
-        clean = clean.replace(/[()[\]{}|,:;+/_-]+/g, " ");
-        clean = clean.replace(/\b(?:and|org|all|dd(?:5\.1|2\.0)?)\b/gi, " ");
-        return clean.replace(/\s+/g, " ").trim();
-    }
-
-    async function searchTMDBIdByTitle(title, isMovie, year) {
-        let query = normalizeLookupTitle(title, isMovie);
-        if (!query) return null;
-        if (year) query = query.replace(/\b(?:19|20)\d{2}\b/g, " ").replace(/\s+/g, " ").trim();
-        if (!query) return null;
-
-        const endpoint = isMovie ? "movie" : "tv";
-        const params = [`api_key=${TMDB_API_KEY}`, `query=${encodeURIComponent(query)}`];
-        if (year) {
-            params.push(isMovie ? `year=${year}` : `first_air_date_year=${year}`);
-        }
-
-        const url = tmdbApi(`search/${endpoint}`, params.join("&"));
-        const data = await fetchJson(url, { "Accept": "application/json" }, {});
-        const results = Array.isArray(data.results) ? data.results : [];
-        if (!results.length) return null;
-
-        const queryLc = query.toLowerCase();
-        const scored = results.map(result => {
-            const titleText = (isMovie ? result.title : result.name || "").toLowerCase();
-            let score = 0;
-            if (titleText === queryLc) score += 100;
-            else if (titleText.includes(queryLc) || queryLc.includes(titleText)) score += 60;
-            if (year) {
-                const resultYear = parseInt(((isMovie ? result.release_date : result.first_air_date) || "").split("-")[0], 10);
-                if (resultYear === year) score += 30;
-            }
-            score += result.popularity || 0;
-            return { id: result.id, score };
-        }).sort((a, b) => b.score - a.score);
-
-        return scored[0]?.id || null;
-    }
-
-    async function load(url, cb) {
-        try {
-            const res = await http_get(url, { headers: HEADERS });
-            const doc = await parseHtml(res.body);
-            
-            const rawTitle = doc.querySelector('.page-title span')?.textContent?.trim() || "Unknown Title";
-            const description = doc.querySelector('.recent-movies p')?.textContent?.trim() || "";
-            const poster = doc.querySelector('main.page-body img.aligncenter')?.getAttribute('src');
-            
-            const typeraw = doc.querySelector('h1.page-title span')?.textContent || "";
-            const isMovie = typeraw.toLowerCase().includes("movie");
-            
-            const seasonMatch = rawTitle.match(/(?:Season|S)\s*(\d+)/i);
-            const seasonNumber = seasonMatch ? parseInt(seasonMatch[1]) : 1;
-            const titleYear = extractYearFromTitle(rawTitle);
-
-            // Metadata Enrichment
-            let tmdbData = null;
-            let tmdbSeasonEpisodes = {};
-            const imdbLink = doc.querySelector('a[href*="imdb.com"]')?.getAttribute('href');
-            const tmdbLink = doc.querySelector('a[href*="themoviedb.org"]')?.getAttribute('href');
-            const trailer = doc.querySelector('.responsive-embed-container > iframe:nth-child(1)')?.getAttribute('src')
-                ?.replace("/embed/", "/watch?v=");
-            const trailers = [makeTrailer(trailer)].filter(Boolean);
-            const recommendations = parseRecommendations(doc, url);
-            
-            let tmdbId = null;
-            let imdbId = extractImdbId(imdbLink);
-            if (tmdbLink) {
-                tmdbId = tmdbLink.split('/')[4]?.split('-')[0];
-            } else if (imdbLink) {
-                if (imdbId) {
-                    const findUrl = tmdbApi(`find/${imdbId}`, "external_source=imdb_id");
-                    const findData = await fetchJson(findUrl, { "Accept": "application/json" }, {});
-                    tmdbId = isMovie ? findData.movie_results?.[0]?.id : findData.tv_results?.[0]?.id;
-                }
-            }
-
-            if (tmdbId) {
-                tmdbData = await getTMDBDetails(tmdbId, isMovie ? "movie" : "tv");
-                if (!isMovie) {
-                    tmdbSeasonEpisodes = await getTMDBSeasonEpisodes(tmdbId, seasonNumber);
-                }
-            } else {
-                tmdbId = await searchTMDBIdByTitle(rawTitle, isMovie, titleYear);
-                if (tmdbId) {
-                    tmdbData = await getTMDBDetails(tmdbId, isMovie ? "movie" : "tv");
-                    if (!isMovie) {
-                        tmdbSeasonEpisodes = await getTMDBSeasonEpisodes(tmdbId, seasonNumber);
-                    }
-                }
-            }
-            imdbId = tmdbData?.imdbId || imdbId;
-
-            let finalTitle = tmdbData?.title || rawTitle.replace(/\|.*$/, "").trim();
-            if (!isMovie && seasonNumber && !finalTitle.toLowerCase().includes(`season ${seasonNumber}`)) {
-                finalTitle = `${finalTitle} (Season ${seasonNumber})`;
-            }
-
-            const item = new MultimediaItem({
-                title: finalTitle,
-                url: url,
-                posterUrl: tmdbData?.poster || poster,
-                bannerUrl: tmdbData?.backdrop,
-                description: tmdbData?.description || description,
-                year: tmdbData?.year ? parseInt(tmdbData.year) : null,
-                score: tmdbData?.rating,
-                tags: tmdbData?.genres,
-                cast: tmdbData?.cast,
-                logoUrl: tmdbData?.logoUrl || undefined,
-                trailers: trailers.length ? trailers : undefined,
-                recommendations: recommendations.length ? recommendations : undefined,
-                syncData: buildSyncData(tmdbId, imdbId),
-                type: isMovie ? "movie" : "series",
-                contentType: isMovie ? "movie" : "series"
-            });
-
-            if (isMovie) {
-                const content = doc.querySelector('.page-body') || doc.querySelector('main') || doc;
-                const links = Array.from(content.querySelectorAll('a'))
-                    .map(a => ({
-                        text: a.textContent.trim(),
-                        href: normalizeSiteUrl(a.getAttribute('href'))
-                    }))
-                    .filter(l => l.href && (l.href.includes("hdstream4u") || l.href.includes("hubstream") || l.text.match(/480|720|1080|2160|4k/i)) && !l.href.includes(MAIN_URL));
-                
-                item.episodes = [
-                    new Episode({
-                        name: "Play",
-                        url: JSON.stringify(links.map(l => ({ url: l.href, name: l.text }))),
-                        season: 1,
-                        episode: 1,
-                        posterUrl: tmdbData?.poster || poster
-                    })
-                ];
-            } else {
-                // Series logic
-                const episodesMap = {};
-                const content = doc.querySelector('.page-body') || doc.querySelector('main') || doc;
-                const allElements = content.querySelectorAll('h3, h4, p, span, strong');
-                
-                let currentEpNum = null;
-                for (const el of Array.from(allElements)) {
-                    const text = el.textContent.trim();
-                    const epMatch = text.match(/(?:Episode|E|Ep|EPiSODE)\s*(\d+)/i);
-                    
-                    if (epMatch) {
-                        currentEpNum = parseInt(epMatch[1]);
-                        if (!episodesMap[currentEpNum]) episodesMap[currentEpNum] = [];
-                    }
-
-                    if (currentEpNum) {
-                        const elLinks = Array.from(el.querySelectorAll('a')).map(a => normalizeSiteUrl(a.getAttribute('href'))).filter(Boolean);
-                        for (const link of elLinks) {
-                            if (!link.includes(MAIN_URL) && !episodesMap[currentEpNum].includes(link)) {
-                                episodesMap[currentEpNum].push(link);
-                            }
-                        }
-                    }
-
-                    // Direct "All Episodes" link blocks
-                    const aTags = Array.from(el.querySelectorAll('a'));
-                    for (const a of aTags) {
-                        const aText = a.textContent.trim().toLowerCase();
-                        const pText = a.parentElement?.textContent?.toLowerCase() || "";
-                        const combinedText = aText + " " + pText;
-                        
-                        if (combinedText.match(/480|720|1080|2160|4k/i) && (combinedText.includes("download") || combinedText.includes("zip") || combinedText.includes("pack"))) {
-                            const link = normalizeSiteUrl(a.getAttribute('href'));
-                            if (link && !link.includes(MAIN_URL)) {
-                                try {
-                                    const resolvedUrl = await withTimeout(getRedirectLinks(link), 8000, null);
-                                    if (resolvedUrl) {
-                                        const epRes = await http_get(resolvedUrl, { headers: HEADERS });
-                                        const epDoc = await parseHtml(epRes.body);
-                                        epDoc.querySelectorAll('h5 a, p a, a').forEach(aElement => {
-                                            const epText = aElement.textContent;
-                                            const epLink = normalizeSiteUrl(aElement.getAttribute('href'));
-                                            const epNumMatch = epText.match(/(?:Episode|E|Ep|EPiSODE)\s*(\d+)/i);
-                                            if (epNumMatch && epLink) {
-                                                const epNum = parseInt(epNumMatch[1]);
-                                                if (!episodesMap[epNum]) episodesMap[epNum] = [];
-                                                if (!episodesMap[epNum].includes(epLink)) {
-                                                    episodesMap[epNum].push(epLink);
-                                                }
-                                            }
-                                        });
-                                    }
-                                } catch (e) {}
-                            }
-                        }
-                    }
-                }
-
-                // Fallback for Season Packs if still empty
-                if (Object.keys(episodesMap).length === 0) {
-                    const fallbackLinks = Array.from(content.querySelectorAll('a'))
-                        .filter(a => {
-                            const t = (a.textContent + " " + (a.parentElement?.textContent || "")).toLowerCase();
-                            return t.match(/480|720|1080|2160|4k/i) && !a.getAttribute('href')?.includes(MAIN_URL);
-                        })
-                        .map(a => normalizeSiteUrl(a.getAttribute('href')))
-                        .filter(Boolean);
-                    
-                    if (fallbackLinks.length > 0) {
-                        const totalEpisodes = Object.keys(tmdbSeasonEpisodes).length || 1;
-                        const uniqueLinks = [...new Set(fallbackLinks)];
-                        for (let i = 1; i <= totalEpisodes; i++) {
-                            episodesMap[i] = uniqueLinks;
-                        }
-                    }
-                }
-
-                item.episodes = Object.keys(episodesMap).sort((a,b) => a-b).map(epNum => {
-                    const epInfo = tmdbSeasonEpisodes[epNum];
-                    const epLinks = [...new Set(episodesMap[epNum])].map(u => ({ url: u }));
-                    return new Episode({
-                        name: epInfo?.name || `Episode ${epNum}`,
-                        description: epInfo?.description,
-                        posterUrl: epInfo?.posterUrl,
-                        airDate: epInfo?.airDate,
-                        rating: epInfo?.rating,
-                        url: JSON.stringify(epLinks),
-                        season: seasonNumber,
-                        episode: parseInt(epNum)
-                    });
-                });
-            }
-
-            cb({ success: true, data: item });
-        } catch (e) {
-            cb({ success: false, error: e.message });
-        }
-    }
-
-    function rot13(value) {
-        return (value || "").replace(/[a-zA-Z]/g, function(c) {
-            return String.fromCharCode((c <= "Z" ? 90 : 122) >= (c = c.charCodeAt(0) + 13) ? c : c - 26);
-        });
-    }
-
-    async function getRedirectLinks(url) {
-        console.log("HDHub4U: getRedirectLinks for: " + url);
-        try {
-            const response = await http_get(url, { headers: HEADERS });
-            if (response.status !== 200) {
-                console.log("HDHub4U: getRedirectLinks HTTP " + response.status + " for " + url);
-                return null;
-            }
-            const doc = response.body;
-
-            // CloudStream-style: match s('o','{BASE64}') and ck('_wp_http_{digits}','{val}'), concatenate all
-            const csRegex = /s\('o','([A-Za-z0-9+/=]+)'|ck\('_wp_http_\d+','([^']+)'/g;
-            let combined = "";
-            let m;
-            while ((m = csRegex.exec(doc)) !== null) {
-                combined += m[1] || m[2] || "";
-            }
-            if (combined) console.log("HDHub4U: getRedirectLinks CS regex matched, combined len=" + combined.length);
-            if (combined) {
-                try {
-                    const decoded = atob(atob(rot13(atob(combined))));
-                    if (decoded.includes("{") || decoded.includes("[")) {
-                        const json = JSON.parse(decoded);
-                        const encodedUrl = atob(json.o || "").trim();
-                        if (encodedUrl) return encodedUrl;
-                        const data = atob(json.data || "").trim();
-                        const wpHttp = (json.blog_url || "").trim();
-                        if (wpHttp && data) {
-                            const drRes = await http_get(`${wpHttp}?re=${data}`, { headers: HEADERS });
-                            const b = drRes.body.trim();
-                            if (b.startsWith("http")) return b;
-                            const bDoc = await parseHtml(b);
-                            return bDoc.querySelector("body")?.textContent?.trim() || b;
-                        }
-                    }
-                } catch (_) {}
-            }
-
-            // Fallback: search for individual base64 tokens (older method)
-            const allBase64 = doc.match(/[A-Za-z0-9+/=]{50,}/g) || [];
-            for (const token of allBase64) {
-                try {
-                    const s1 = atob(atob(rot13(atob(token))));
-                    if (s1.includes("{") || s1.includes("[")) {
-                        console.log("HDHub4U: getRedirectLinks found VALID JSON in token len " + token.length);
-                        const json = JSON.parse(s1);
-                        const encodedUrl = atob(json.o || "").trim();
-                        if (encodedUrl) return encodedUrl;
-
-                        const data = atob(json.data || "").trim();
-                        const wpHttp = (json.blog_url || "").trim();
-                        if (wpHttp && data) {
-                            const drRes = await http_get(`${wpHttp}?re=${data}`, { headers: HEADERS });
-                            const b = drRes.body.trim();
-                            if (b.startsWith("http")) return b;
-                            const bDoc = await parseHtml(b);
-                            return bDoc.querySelector("body")?.textContent?.trim() || b;
-                        }
-                    }
-                } catch (_) {}
-            }
-
-            // Fallback for anchors that might be the next step
-            const doc2 = await parseHtml(doc);
-            const anchors = doc2.querySelectorAll("a");
-            for (const a of anchors) {
-                const href = a.getAttribute("href") || "";
-                if (href.includes("techyboy") || href.includes("gadgetsweb") || href.includes("cryptoinsights")) {
-                    if (href !== url && !href.includes(url)) return await getRedirectLinks(href);
-                }
-            }
-
-            // Fallback: follow JavaScript redirects (new gadgetsweb format uses window.location.href)
-            const redirectUrls = [];
-            const jsRedirectHref = doc.match(/window\.location\.href\s*=\s*['"]?([^'"\s;)]+)['"]?/);
-            if (jsRedirectHref && jsRedirectHref[1].startsWith("http")) {
-                redirectUrls.push(jsRedirectHref[1]);
-            } else {
-                // Try setTimeout-based redirects
-                const timeoutMatch = doc.match(/(?:setTimeout|setInterval)\([^,]*['"]?([^'"\s;)]+\/['"]?)/);
-                if (timeoutMatch && timeoutMatch[1].startsWith("http")) {
-                    redirectUrls.push(timeoutMatch[1]);
-                }
-            }
-            // Try meta refresh redirects
-            const metaMatch = doc.match(/<meta[^>]*?url=['"]?([^'"\s>]+)/i);
-            if (metaMatch && metaMatch[1].startsWith("http")) redirectUrls.push(metaMatch[1]);
-
-            for (const redirectUrl of redirectUrls) {
-                try {
-                    console.log("HDHub4U: getRedirectLinks following JS redirect to: " + redirectUrl.substring(0, 100));
-                    const followRes = await http_get(redirectUrl, { headers: HEADERS });
-                    if (followRes && followRes.body) {
-                        // Look for hubcloud/hubcdn/hubdrive URLs on the destination page
-                        const hubMatch = followRes.body.match(/https?:\/\/(?:hubcloud|hubcdn|hubdrive)[^\s"'<>]+/i);
-                        if (hubMatch) {
-                            console.log("HDHub4U: getRedirectLinks found hubcloud link: " + hubMatch[0].substring(0, 80));
-                            return hubMatch[0];
-                        }
-                        // Recursive: if destination has more JS redirects, follow them
-                        const destRedirect = followRes.body.match(/window\.location\.href\s*=\s*['"]?([^'"\s;)]+)['"]?/);
-                        if (destRedirect && destRedirect[1].startsWith("http")) {
-                            return await getRedirectLinks(destRedirect[1]);
-                        }
-                    }
-                } catch (_) {}
-            }
-
-            return null;
-        } catch (e) {
-            console.error("HDHub4U: getRedirectLinks Error: " + e.message);
-            return null;
-        }
-    }
-
-    async function hubCloudExtractor(url, referer) {
-        console.log("HDHub4U: hubCloudExtractor for: " + url);
-        try {
-            let currentUrl = url;
-            const res = await http_get(currentUrl, { headers: { ...HEADERS, "Referer": referer } });
-            let pageData = res.body;
-            let finalUrl = currentUrl;
-
-            if (!currentUrl.includes("hubcloud.php")) {
-                let nextHref = "";
-                const doc = await parseHtml(pageData);
-                const downloadBtn = doc.querySelector("#download");
-                if (downloadBtn) {
-                    nextHref = downloadBtn.getAttribute("href");
-                } else {
-                    const scriptUrlMatch = pageData.match(/var url = '([^']*)'/);
-                    if (scriptUrlMatch) nextHref = scriptUrlMatch[1];
-                }
-
-                if (nextHref) {
-                    if (!nextHref.startsWith("http")) {
-                        const urlObj = new URL(currentUrl);
-                        nextHref = `${urlObj.protocol}//${urlObj.hostname}/${nextHref.replace(/^\//, "")}`;
-                    }
-                    console.log("HDHub4U: HubCloud next step: " + nextHref);
-                    finalUrl = nextHref;
-                    const res2 = await http_get(finalUrl, { headers: { ...HEADERS, "Referer": currentUrl } });
-                    pageData = res2.body;
-                }
-            }
-
-            const $ = await parseHtml(pageData);
-            const size = $.querySelector("i#size")?.textContent?.trim() || "";
-            const header = $.querySelector("div.card-header")?.textContent?.trim() || "";
-            const qualityStr = header.match(/(\d{3,4})[pP]/)?.[1] || "";
-            const headerDetails = cleanTitle(header);
-            const labelExtras = (headerDetails ? `[${headerDetails}]` : "") + (size ? `[${size}]` : "");
-
-            const links = [];
-            const elements = Array.from($.querySelectorAll("a.btn, a.btn-lg, a.btn-primary, a.btn-success, a.btn-danger, button.btn"));
-            console.log("HDHub4U: HubCloud found " + elements.length + " buttons");
-            for (const element of elements) {
-                let link = element.getAttribute("href");
-                const text = element.textContent.toLowerCase();
-                if (!link) {
-                    const onclick = element.getAttribute("onclick") || "";
-                    const onclickMatch = onclick.match(/location(?:\s*\.\s*href)?\s*=\s*['"]([^'"]+)['"]|window\.open\s*\(\s*['"]([^'"]+)['"]/i);
-                    if (onclickMatch) link = onclickMatch[1] || onclickMatch[2];
-                }
-                if (!link || /telegram|facebook|twitter|tinyurl|tutorial/i.test(link + " " + text)) {
-                    console.log("HDHub4U: HubCloud skipped button: text=[" + (text || "").substring(0, 40) + "] link=[" + (link || "null").substring(0, 40) + "]");
-                    continue;
-                }
-
-                if (text.includes("download file") || text.includes("fsl server") || text.includes("s3 server") || text.includes("fslv2") || text.includes("mega server") || text.includes("zipdisk")) {
-                    let label = "HubCloud";
-                    if (text.includes("fsl server")) label = "HubCloud [FSL]";
-                    else if (text.includes("s3 server")) label = "HubCloud [S3]";
-                    else if (text.includes("fslv2")) label = "HubCloud [FSLv2]";
-                    else if (text.includes("mega server")) label = "HubCloud [Mega]";
-                    else if (text.includes("zipdisk")) label = "HubCloud [ZipDisk]";
-                    console.log("HDHub4U: HubCloud " + label + " -> " + link);
-                    links.push(new StreamResult({
-                        source: label,
-                        name: `${label} ${labelExtras}`,
-                        url: link,
-                        quality: qualityStr,
-                        size: size
-                    }));
-                } else if (text.includes("buzzserver")) {
-                    console.log("HDHub4U: HubCloud BuzzServer -> " + link);
-                    links.push(new StreamResult({
-                        source: "BuzzServer",
-                        name: `BuzzServer ${labelExtras}`,
-                        url: link,
-                        quality: qualityStr,
-                        size: size
-                    }));
-                } else if (link && link.includes("pixeldra")) {
-                    console.log("HDHub4U: HubCloud PixelDrain -> " + link);
-                    links.push(new StreamResult({
-                        source: "PixelDrain",
-                        name: `PixelDrain ${labelExtras}`,
-                        url: link.includes("?download") ? link : `https://pixeldrain.com/api/file/${link.split('/').pop()}?download`,
-                        quality: qualityStr,
-                        size: size
-                    }));
-                } else if (link && link.startsWith("http") && !link.includes("facebook.com") && !link.includes("twitter.com")) {
-                    console.log("HDHub4U: HubCloud nested check: " + link + " text=" + text.substring(0, 40));
-                    const extracted = await internalLoadExtractor(link, finalUrl);
-                    links.push(...extracted.map(l => {
-                        l.quality = l.quality || qualityStr || "1080p";
-                        l.size = l.size || size;
-                        return l;
-                    }));
-                } else {
-                    console.log("HDHub4U: HubCloud unhandled button: text=[" + (text || "").substring(0, 40) + "] link=[" + (link || "null").substring(0, 40) + "]");
-                }
-            }
-            return links;
-        } catch (e) {
-            console.error("HDHub4U: hubCloudExtractor Error: " + e.message);
-            return [];
-        }
-    }
-
-    async function hubCdnExtractor(url, referer) {
-        try {
-            const res = await http_get(url, { headers: { ...HEADERS, "Referer": referer } });
-            const data = res.body;
-            let encoded = data.match(/r=([A-Za-z0-9+/=]+)/)?.[1];
-            if (!encoded) {
-                const scriptEncoded = data.match(/reurl\s*=\s*["']([^"']+)["']/)?.[1];
-                if (scriptEncoded) encoded = scriptEncoded.split("?r=").pop();
-            }
-            if (encoded) {
-                const decoded = atob(encoded);
-                const rawLink = decoded.includes("link=")
-                    ? decoded.substring(decoded.lastIndexOf("link=") + 5)
-                    : decoded;
-                const m3u8Link = rawLink.trim();
-                if (/^https?:\/\//i.test(m3u8Link)) {
-                    // Extract quality from url if present (e.g. "480p⚡[860MB]")
-                    const qualityStr = url.match(/[&?]q=(\d{3,4})|(\d{3,4})[pP]/i)?.[1] || "";
-                    return [new StreamResult({ source: "HubCdn", url: m3u8Link, quality: qualityStr || "" })];
-                }
-            }
-            return [];
-        } catch (e) {
-            return [];
-        }
-    }
-
-    async function hubDriveExtractor(url, referer) {
-        try {
-            const res = await http_get(url, { headers: { ...HEADERS, "Referer": referer } });
-            const doc = await parseHtml(res.body);
-            // CloudStream-style: specific button selector
-            let href = doc.querySelector(".btn.btn-primary.btn-user.btn-success1.m-1")?.getAttribute("href");
-            if (!href) {
-                // Fallback: generic anchor search
-                const anchors = Array.from(doc.querySelectorAll("a")).map(a => a.getAttribute("href")).filter(Boolean);
-                href = anchors.find(h => /hubcloud|hubcdn|hubdrive|pixeldrain|streamtape|hdstream4u|hubstream/i.test(h));
-            }
-            if (href) {
-                const finalHref = normalizeSiteUrl(href);
-                if (finalHref.includes("hubcloud")) return await hubCloudExtractor(finalHref, url);
-                return await internalLoadExtractor(finalHref, url);
-            }
-            return [];
-        } catch (e) {
-            return [];
-        }
-    }
-
-    async function hbLinksExtractor(url) {
-        try {
-            const res = await http_get(url, { headers: { ...HEADERS, "Referer": url } });
-            const doc = await parseHtml(res.body);
-            const contentRoot = doc.querySelector(".entry-content") || doc;
-            const headingNodes = Array.from(contentRoot.querySelectorAll("h3, h5"));
-            const candidateLinks = [];
-
-            for (const heading of headingNodes) {
-                const headingText = cleanTitle(heading.textContent || "").replace(/\s+/g, " ").trim();
-                const qualityMatch = headingText.match(/(4K|2160p|1080p|720p|480p|360p)/i);
-                const quality = qualityMatch ? qualityMatch[1] : "";
-                const headingAnchors = Array.from(heading.querySelectorAll("a"))
-                    .map(a => ({
-                        href: normalizeSiteUrl(a.getAttribute("href")),
-                        text: cleanTitle(a.textContent || "").trim()
-                    }))
-                    .filter(a => a.href);
-
-                if (!headingAnchors.length) continue;
-
-                const directAnchors = headingAnchors.filter(a => a.href.includes("hubcloud"));
-                const instantAnchors = headingAnchors.filter(a => a.href.includes("hubcdn"));
-                const watchAnchors = headingAnchors.filter(a => a.href.includes("hdstream4u") || a.href.includes("hubstream"));
-                const fallbackAnchors = headingAnchors.filter(a => !a.href.includes("hubdrive"));
-
-                const preferredAnchors = directAnchors.length
-                    ? directAnchors
-                    : instantAnchors.length
-                        ? instantAnchors
-                        : watchAnchors.length
-                            ? watchAnchors
-                            : fallbackAnchors;
-
-                for (const anchor of preferredAnchors) {
-                    candidateLinks.push({
-                        href: anchor.href,
-                        quality,
-                        label: headingText || anchor.text || "Download"
-                    });
-                }
-            }
-
-            const fallbackLinks = candidateLinks.length ? [] : Array.from(doc.querySelectorAll("h3 a, h5 a, div.entry-content p a"))
-                .map(a => ({
-                    href: normalizeSiteUrl(a.getAttribute("href")),
-                    quality: "",
-                    label: cleanTitle(a.textContent || "").trim()
-                }))
-                .filter(a => a.href && !a.href.includes("hubdrive"));
-
-            const links = (candidateLinks.length ? candidateLinks : fallbackLinks).filter(item => item.href);
-            const uniqueLinks = [];
-            const seenLinks = new Set();
-            for (const item of links) {
-                if (seenLinks.has(item.href)) continue;
-                seenLinks.add(item.href);
-                uniqueLinks.push(item);
-            }
-
-            const results = await mapLimit(uniqueLinks, 5, async (item) => {
-                const extracted = await withTimeout(internalLoadExtractor(item.href, url), 5000, []);
-                return extracted.map(stream => {
-                    if (item.quality && (!stream.quality || stream.quality === "Unknown")) {
-                        stream.quality = item.quality;
-                    }
-                    if (item.label && stream.source && !stream.source.includes(item.quality || "")) {
-                        const qualityPart = item.quality ? ` - ${item.quality}` : "";
-                        stream.source = `${stream.source}${qualityPart}`;
-                    }
-                    return stream;
-                });
-            });
-            return results.flat();
-        } catch (e) {
-            return [];
-        }
-    }
-
-    async function vidStackExtractor(url) {
-        try {
-            const hash = url.split("#").pop().split("/").pop();
-            const baseUrl = new URL(url).origin;
-            const apiUrl = `${baseUrl}/api/v1/video?id=${hash}`;
-            
-            const response = await http_get(apiUrl, { headers: { ...HEADERS, "Referer": url } });
-            const encoded = response.body.trim();
-            
-            const key = btoa("kiemtienmua911ca"); // Convert to base64 for the bridge
-            const ivs = [btoa("1234567890oiuytr"), btoa("0123456789abcdef")];
-            
-            // Convert hex to base64 for the Dart bridge which expects base64
-            const encodedB64 = btoa(encoded.match(/\w{2}/g).map(a => String.fromCharCode(parseInt(a, 16))).join(""));
-
-            for (const ivB64 of ivs) {
-                try {
-                    const decryptedText = await globalThis.crypto.decryptAES(encodedB64, key, ivB64);
-                    if (decryptedText && decryptedText.includes("source")) {
-                        const m3u8Match = decryptedText.match(/"source":"(.*?)"/);
-                        const m3u8 = m3u8Match ? m3u8Match[1].replace(/\\/g, "") : null;
-                        
-                        if (m3u8) {
-                            return [new StreamResult({
-                                source: "Hubstream",
-                                url: m3u8.replace("https:", "http:"),
-                                headers: {
-                                    "Referer": url,
-                                    "Origin": url.split("/").pop()
-                                }
-                            })];
-                        }
-                    }
-                } catch (e) {}
-            }
-            return [];
-        } catch (e) {
-            return [];
-        }
-    }
-
-    async function streamTapeExtractor(url) {
-        try {
-            const res = await http_get(url, { headers: HEADERS });
-            const data = res.body;
-            let videoSrc = data.match(/document\.getElementById\('videolink'\)\.innerHTML = (.*?);/)?.[1];
-            if (videoSrc) {
-                const parts = videoSrc.match(/'([^']+)'/g).map(p => p.slice(1, -1));
-                const finalUrl = "https:" + parts.join("");
-                return [new StreamResult({ source: "StreamTape", url: finalUrl, quality: "720p" })];
-            }
-            return [];
-        } catch (e) {
-            return [];
-        }
-    }
-
-    async function hdStream4uExtractor(url, referer = MAIN_URL) {
-        try {
-            // Extract file_code from URL like https://hdstream4u.com/file/jvvq9iql1moy
-            const fileCode = url.split("/file/").pop().split("/")[0].split("?")[0];
-            if (!fileCode) {
-                console.log("HDHub4U: HdStream4u could not parse file_code from: " + url);
-                return [new StreamResult({ source: "HdStream4u", url: url })];
-            }
-
-            const embedUrl = `https://morencius.com/embed/${fileCode}`;
-            console.log(`HDHub4U: HdStream4u fetching embed: ${embedUrl}`);
-
-            const response = await http_get(embedUrl, {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-                    "Referer": url
-                }
-            });
-
-            const html = response.body || "";
-
-            // Find and decode the Dean Edwards packed JavaScript
-            // Format: eval(function(p,a,c,k,e,d){...}('ENCODED',RADIX,COUNT,'DICT'.split('|')))
-            var packedMatch = html.match(/eval\(function\(p,a,c,k,e,d\)[^]*?}\('(.+?)',(\d+),(\d+),'([^']+)'\.split\('\|'\)/);
-            if (packedMatch) {
-                var pEncoded = packedMatch[1];
-                var radix = parseInt(packedMatch[2]);
-                var count = parseInt(packedMatch[3]);
-                var dict = packedMatch[4].split("|");
-
-                // Dean Edwards packer decoder
-                function decodePacked(str, base, cnt, words) {
-                    while (cnt--) {
-                        if (words[cnt]) {
-                            str = str.replace(new RegExp("\\b" + cnt.toString(base) + "\\b", "g"), words[cnt]);
-                        }
-                    }
-                    return str;
-                }
-
-                var decoded = decodePacked(pEncoded, radix, count, dict);
-
-                // Extract relative stream URL (hls4 - morencius internal CDN)
-                var hls4Match = decoded.match(/\/stream\/[^"']+/);
-                if (hls4Match) {
-                    var streamUrl = "https://morencius.com" + hls4Match[0];
-                    console.log("HDHub4U: HdStream4u extracted hls4: " + streamUrl.substring(0, 80) + "...");
-                    return [new StreamResult({
-                        source: "HdStream4u",
-                        url: streamUrl,
-                        headers: {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-                            "Referer": embedUrl
-                        }
-                    })];
-                }
-
-                // Fallback: extract absolute acek-cdn HLS URL (hls2)
-                var hls2Match = decoded.match(/https:\/\/[^"']+acek-cdn[^"']*master\.m3u8[^"']*/);
-                if (hls2Match) {
-                    var acekUrl = hls2Match[0];
-                    console.log("HDHub4U: HdStream4u extracted acek-cdn hls2: " + acekUrl.substring(0, 80) + "...");
-                    return [new StreamResult({
-                        source: "HdStream4u",
-                        url: acekUrl,
-                        headers: {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-                            "Referer": embedUrl
-                        }
-                    })];
-                }
-            }
-
-            // Final fallback: return raw URL (current behavior)
-            console.log("HDHub4U: HdStream4u no video found in embed, returning raw URL");
-            return [new StreamResult({ source: "HdStream4u", url: url })];
-        } catch (e) {
-            console.error(`HDHub4U: HdStream4u extractor error: ${e.message}`);
-            return [new StreamResult({ source: "HdStream4u", url: url })];
-        }
-    }
-
-    async function internalLoadExtractor(url, referer = MAIN_URL) {
-        try {
-            const hostname = new URL(url).hostname;
-            const isRedirect = url.includes("?id=") || ["techyboy4u", "gadgetsweb.xyz", "cryptoinsights.site", "bloggingvector", "ampproject.org"].some(h => hostname.includes(h));
-            
-            if (isRedirect) {
-                const res = await getRedirectLinks(url);
-                if (res) {
-                    // Strip leading ? or & if present (sometimes atob returns it)
-                    let cleanRes = normalizeSiteUrl(res.trim());
-                    if (cleanRes.startsWith("?") || cleanRes.startsWith("&")) {
-                        cleanRes = cleanRes.substring(1);
-                    }
-                    
-                    if (cleanRes.startsWith("http")) {
-                        console.log("HDHub4U: internalLoadExtractor redirected to: " + cleanRes);
-                        return await internalLoadExtractor(cleanRes, url);
-                    } else if (cleanRes.includes("hubcloud") || cleanRes.includes("hubcdn") || cleanRes.includes("hubdrive")) {
-                        // Likely a path or partial URL
-                        const baseUrl = new URL(url);
-                        const fullUrl = cleanRes.startsWith("/") ? `${baseUrl.origin}${cleanRes}` : `${baseUrl.origin}/${cleanRes}`;
-                        return await internalLoadExtractor(fullUrl, url);
-                    }
-                }
-                return [];
-            }
-            
-            if (hostname.includes("hubcloud")) return await hubCloudExtractor(url, referer);
-            if (hostname.includes("hubcdn")) return await hubCdnExtractor(url, referer);
-            if (hostname.includes("hubdrive")) return await hubDriveExtractor(url, referer);
-            if (hostname.includes("hblinks") || hostname.includes("hubstream.dad")) return await hbLinksExtractor(url);
-            if (hostname.includes("hubstream") || hostname.includes("vidstack")) return await vidStackExtractor(url);
-            if (hostname.includes("streamtape")) return await streamTapeExtractor(url);
-            if (hostname.includes("pixeldrain")) {
-                return [new StreamResult({
-                    source: "PixelDrain",
-                    url: url.includes("?download") ? url : `https://pixeldrain.com/api/file/${url.split('/').pop()}?download`
-                })];
-            }
-            if (hostname.includes("hdstream4u")) {
-                return await hdStream4uExtractor(url, referer);
-            }
-            return [];
-        } catch (e) {
-            console.error(`HDHub4U: internalLoadExtractor error for ${url}: ${e.message}`);
-            return [];
-        }
-    }
-
-    async function loadStreams(data, cb) {
-        console.log("HDHub4U: Starting loadStreams for data: " + (typeof data === 'string' ? data.substring(0, 100) : "object"));
-        try {
-            let links = [];
-            if (typeof data === 'string' && data.startsWith('[')) {
-                links = JSON.parse(data);
-            } else if (Array.isArray(data)) {
-                links = data;
-            } else if (typeof data === 'object' && data.url) {
-                if (data.url.startsWith('[')) {
-                    links = JSON.parse(data.url);
-                } else {
-                    links = [{ url: data.url }];
-                }
-            } else if (typeof data === 'string') {
-                links = [{ url: data }];
-            }
-
-            if (!links || links.length === 0) {
-                console.log("HDHub4U: No links provided in data");
-                return cb({ success: true, data: [] });
-            }
-
-            console.log("HDHub4U: Processing " + links.length + " initial links");
-            const allResults = [];
-            
-            // Deduplicate initial links by URL
-            const uniqueLinks = [];
-            const seenInitialUrls = new Set();
-            for (const l of links) {
-                const u = typeof l === 'string' ? l : l.url;
-                if (u && !seenInitialUrls.has(u)) {
-                    seenInitialUrls.add(u);
-                    uniqueLinks.push(typeof l === 'string' ? { url: u, name: "" } : l);
-                }
-            }
-            
-            const extractedGroups = await mapLimit(uniqueLinks, 5, async (lObj) => {
-                try {
-                    const lUrl = normalizeSiteUrl(lObj.url);
-                    const lName = lObj.name || "";
-                    const streams = await withTimeout(internalLoadExtractor(lUrl), 8000, []);
-
-                    streams.forEach(s => {
-                        let finalQuality = s.quality && s.quality !== "Unknown" ? s.quality : "";
-
-                        const resMatch = lName.match(/(2160p|1080p|720p|480p|360p|4K|8K)/i);
-                        if (resMatch && !finalQuality) {
-                            finalQuality = resMatch[1];
-                        }
-
-                        const extMatch = lName.match(/\[(.*?)\]/);
-                        const extInfo = extMatch ? ` ${extMatch[0]}` : "";
-
-                        let sourceLabel = s.source;
-                        if (finalQuality && !sourceLabel.includes(finalQuality)) {
-                            sourceLabel = `${sourceLabel} - ${finalQuality}`;
-                        }
-                        if (extInfo && !sourceLabel.includes(extInfo.trim())) {
-                            sourceLabel = `${sourceLabel}${extInfo}`;
-                        }
-
-                        s.source = sourceLabel;
-                    });
-
-                    return streams;
-                } catch (e) {
-                    console.error("HDHub4U: Extraction error for " + lObj.url + ": " + e.message);
-                    return [];
-                }
-            });
-
-            allResults.push(...extractedGroups.flat());
-
-            console.log("HDHub4U: Total streams before dedup: " + allResults.length);
-            allResults.forEach((r, i) => console.log("HDHub4U:   pre-dedup[" + i + "] source=" + r.source + " url=" + (r.url || "").substring(0, 60)));
-
-            // Deduplicate final results by URL
-            const seen = new Set();
-            const finalResults = allResults.filter(item => {
-                if (seen.has(item.url)) return false;
-                seen.add(item.url);
-                return true;
-            });
-
-            console.log("HDHub4U: Found " + finalResults.length + " final streams");
-            cb({ success: true, data: finalResults });
-        } catch (e) {
-            console.error("HDHub4U: loadStreams Critical Error: " + e.message);
-            cb({ success: false, error: e.message });
-        }
-    }
-
-    async function testEndpoints(cb) {
-        const RESULTS = {};
-        const HEADERS2 = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-            "Cookie": "xla=s4t",
-            "Referer": `${MAIN_URL}/`
-        };
-        const tests = [
-            { name: "WP-API", url: "https://new1.hdhub4u.limo/wp-json/wp/v2/posts?per_page=10" },
-            { name: "HTTP", url: "http://new1.hdhub4u.limo/" },
-            { name: "RSS", url: "https://new1.hdhub4u.limo/feed/" },
-            { name: "Sitemap", url: "https://new1.hdhub4u.limo/wp-sitemap.xml" },
-            { name: "MoviePage", url: "https://new1.hdhub4u.limo/hoppers-2026-hindi-webrip-full-movie/" }
-        ];
-        for (const t of tests) {
-            try {
-                const res = await http_get(t.url, { headers: HEADERS2 });
-                RESULTS[t.name] = { status: res.status, bodyLen: res.body?.length };
-                if (res.body) {
-                    RESULTS[t.name].hasContent = res.body.includes("recent-movies") || res.body.includes("post-title") || res.body.includes("hoppers");
-                }
-            } catch (e) {
-                RESULTS[t.name] = { error: e.message };
-            }
-        }
-        cb({ success: true, data: RESULTS });
-    }
-
-    const plugin = {
-        search: search,
-        getHome: getHome,
-        load: load,
-        loadStreams: loadStreams,
-        testEndpoints: testEndpoints
-    };
-
-    // Export to globalThis for skystream test
-    globalThis.search = search;
-    globalThis.getHome = getHome;
-    globalThis.load = load;
-    globalThis.loadStreams = loadStreams;
-    globalThis.testEndpoints = testEndpoints;
+/*
+* SkyStream HDHub4u provider
+* Use only media you are authorized to access.
+*
+* ── ONE SETTING: manifest.baseUrl ──────────────────────────────
+* plugin.json keeps baseUrl = https://hdhub4u.kz/
+* That domain is HDHub4u's entry point. When it serves the real
+* site the plugin uses it directly; when it only serves the
+* promo/landing page (as it does today) the plugin asks HDHub4u's
+* own mirror service which mirror is live and uses that origin for
+* every request. Nothing else has to be edited when the mirror
+* moves again – see resolveOrigin().
+*
+* ── HOME SCREEN LAYOUT ────────────────────────────────────────
+*   Latest Release            ->  /
+*   TV Shows · Netflix        ->  /category/netflix/
+*   TV Shows · Amazon Prime   ->  /category/amazon-prime-video/
+*   TV Shows · JioHotstar     ->  /category/jiohotstar/
+*   TV Shows · SonyLiv        ->  /category/sonyliv/
+* All of it lives in HOME_LAYOUT below.
+*
+* ── PLAYBACK CHAINS (HDHub4u's own hosts) ─────────────────────
+* Movies / packs:
+*   post page -> hubdrive.* /file/<id>
+*             -> hubcloud.* /drive/<id>
+*             -> gamerxyt.com/hubcloud.php?...  (Generate link)
+*             -> Cloudflare R2 presigned URL (direct mp4/mkv)
+*             + optional pixeldrain mirror
+*
+* Series episodes:
+*   post page -> playdrive.* /e/<id>/s-XX/ep-YY  (watch button)
+*             -> play4u.org /series/<slug>/s-XX/ep-YY
+*             -> window.__PA_PLAY__ / __PA_SERIES__
+*             -> m3u8_url sealed as "pa!~<base64url>"
+*             -> XOR with window.__PA_SEAL_KEY__ -> HLS master
+*   The HLS URL only answers when the Referer is play4u.org, so the
+*   stream is returned with that header attached.
+*
+* Download-only hosts (greenmotors.* token redirect, hdstream4u.*,
+* hubstream.*) are ad-gated / packed scripts. They are recognised
+* so the app can explain the situation instead of failing silently.
+*/
+
+(function () {
+'use strict';
+
+try {
+  console.log('[Hdhub4u] plugin.js loaded');
+} catch (error) {
+  // host without console: continue silently
+}
+
+// =====================================
+// HOME SCREEN LAYOUT  <-- edit me
+// =====================================
+
+var SHORT_TITLES = true; // false = keep the full scene-style titles
+
+var HOME_LAYOUT = {
+  latest: {
+    title: 'Latest Release',
+    path: '/',
+    limit: 40
+  },
+  tvShows: {
+    title: 'TV Shows',
+    limit: 20,
+    // true  -> "TV Shows · Netflix"
+    // false -> "Netflix"
+    grouped: true,
+    // true  -> keep only series in these rows
+    seriesOnly: false,
+    channels: [
+      { title: 'Netflix', path: '/category/netflix/' },
+      { title: 'Amazon Prime', path: '/category/amazon-prime-video/' },
+      { title: 'JioHotstar', path: '/category/jiohotstar/' },
+      { title: 'SonyLiv', path: '/category/sonyliv/' }
+    ]
+  }
+};
+
+// How long a resolved mirror is trusted before asking again.
+var ORIGIN_TTL_MS = 10 * 60 * 1000;
+
+// HDHub4u's mirror service. The site's own landing page asks these
+// endpoints and gets { h: <host>, c: <full site url> } back, both
+// base64 encoded. Order matters: first working answer wins.
+var MIRROR_ENDPOINTS = [
+  'https://h4.suncdn.org/host/',
+  'https://points.topapii.com/host/',
+  'https://ml.theapii.org/host/',
+  'https://dns.pingora.fyi/v2/host'
+];
+
+// No request may run forever: one dead mirror host used to stall
+// getHome() and the plugin test printed "No Output".
+var TIMEOUT = {
+  page: 12000,    // listing / post pages
+  mirror: 6000,   // mirror lookup endpoints
+  host: 12000,    // file / player hosts
+  watchdog: 60000 // absolute cap for getHome()
+};
+
+function log(message) {
+  try {
+    console.log('[Hdhub4u] ' + message);
+  } catch (error) {
+    // logging must never break a request
+  }
+}
+
+// Same as log(), for messages that used to go to console.error().
+// Routed through a function so a host without a console can never
+// turn a catch block into a second, uncaught throw.
+function reportError(message) {
+  log('error: ' + message);
+}
+
+// Wrap a promise in a deadline. Uses setTimeout when the host has it.
+function withTimeout(promise, ms, label) {
+  if (typeof setTimeout !== 'function' || !ms) return promise;
+
+  return new Promise(function (resolve, reject) {
+    var settled = false;
+
+    var timer = setTimeout(function () {
+      if (settled) return;
+
+      settled = true;
+      reject(new Error('Timed out after ' + Math.round(ms / 1000) + 's' +
+        (label ? ' (' + label + ')' : '')));
+    }, ms);
+
+    promise.then(function (value) {
+      if (settled) return;
+
+      settled = true;
+      if (typeof clearTimeout === 'function') clearTimeout(timer);
+      resolve(value);
+    }, function (error) {
+      if (settled) return;
+
+      settled = true;
+      if (typeof clearTimeout === 'function') clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+// =====================================
+// SMALL HELPERS
+// =====================================
+
+function base() {
+return String(manifest.baseUrl || '').replace(/\/+$/, '');
+}
+
+function originHost(url) {
+return String(url || '')
+.replace(/^https?:\/\//i, '')
+.split('/')[0]
+.toLowerCase();
+}
+
+function decode(value) {
+return String(value || '')
+.replace(/&#x([0-9a-f]+);/gi, function (_, number) {
+return String.fromCharCode(parseInt(number, 16));
+})
+.replace(/&#(\d+);/g, function (_, number) {
+return String.fromCharCode(parseInt(number, 10));
+})
+.replace(/&amp;/gi, '&')
+.replace(/&quot;/gi, '"')
+.replace(/&#39;|&apos;/gi, "'")
+.replace(/&lt;/gi, '<')
+.replace(/&gt;/gi, '>')
+.replace(/&nbsp;/gi, ' ');
+}
+
+function text(value) {
+return decode(
+String(value || '').replace(/<[^>]*>/g, ' ')
+).replace(/\s+/g, ' ').trim();
+}
+
+function attr(tag, name) {
+var pattern =
+'(?:^|\\s)' +
+name +
+'\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))';
+
+var match = String(tag || '').match(new RegExp(pattern, 'i'));
+
+return match
+? decode(match[1] || match[2] || match[3] || '')
+: '';
+}
+
+// Base64 decode that also works when the host engine has no atob().
+var B64_CHARS =
+'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+
+function safeAtob(value) {
+var input = String(value || '')
+.replace(/-/g, '+')
+.replace(/_/g, '/')
+.replace(/\s/g, '');
+
+var pad = input.length % 4;
+while (pad > 0 && pad < 4) {
+input += '=';
+pad++;
+}
+
+if (typeof atob === 'function') {
+try {
+return atob(input);
+} catch (error) {
+// fall through to the manual decoder
+}
+}
+
+var output = '';
+var i = 0;
+
+while (i < input.length) {
+var a = B64_CHARS.indexOf(input.charAt(i++));
+var b = B64_CHARS.indexOf(input.charAt(i++));
+var c = B64_CHARS.indexOf(input.charAt(i++));
+var d = B64_CHARS.indexOf(input.charAt(i++));
+
+if (a < 0 || b < 0) break;
+
+var n = (a << 18) | (b << 12) | ((c & 63) << 6) | (d & 63);
+
+output += String.fromCharCode((n >> 16) & 255);
+if (c !== 64 && c >= 0) output += String.fromCharCode((n >> 8) & 255);
+if (d !== 64 && d >= 0) output += String.fromCharCode(n & 255);
+}
+
+return output;
+}
+
+// play4u seals stream URLs as "pa!~" + base64url(XOR(payload, key)).
+function unseal(value, key) {
+var seal = String(value || '').trim();
+
+if (seal.indexOf('pa!~') !== 0) return seal;
+
+var raw = safeAtob(seal.slice(4));
+var pass = String(key || 'pa4u-stream-seal-v1');
+var out = '';
+
+for (var i = 0; i < raw.length; i++) {
+out += String.fromCharCode(
+raw.charCodeAt(i) ^ pass.charCodeAt(i % pass.length)
+);
+}
+
+return out;
+}
+
+function fail(callback, error) {
+callback({
+success: false,
+errorCode: 'UNKNOWN_ERROR',
+message: String(error && error.message ? error.message : error)
+});
+}
+
+// =====================================
+// SITE ORIGIN (baseUrl -> live mirror)
+// =====================================
+
+var siteOrigin = '';   // resolved site origin, e.g. https://new16.hdhub4u.cl
+var originAt = 0;      // when it was resolved
+var originPending = null;
+
+function origin() {
+return siteOrigin || base();
+}
+
+// Any HDHub4u mirror, including the baseUrl host itself.
+function isSiteUrl(url) {
+var host = originHost(url);
+if (!host) return false;
+return /(^|\.)hdhub4u\.[a-z.]+$/i.test(host);
+}
+
+function sitePath(url) {
+var value = String(url || '').trim();
+
+if (!value) return '';
+if (isSiteUrl(value)) {
+return value
+.replace(/^https?:\/\/[^\/]+/i, '')
+|| '/';
+}
+
+if (value.charAt(0) === '/') return value;
+return '/' + value;
+}
+
+function absolute(url) {
+url = decode(url || '').trim();
+
+if (!url) return '';
+
+if (isSiteUrl(url)) {
+return origin() + sitePath(url);
+}
+
+if (/^https?:\/\//i.test(url)) return url;
+if (url.indexOf('//') === 0) return 'https:' + url;
+if (url.charAt(0) === '/') return origin() + url;
+
+return '';
+}
+
+function isPostPage(url) {
+if (!isSiteUrl(url)) return false;
+
+var path = sitePath(url).replace(/^\/+/, '');
+
+return !/^(category|page|wp-|search|author|tag|date|feed|comments|privacy|terms|contact|about|dmca|how-to-download|genre|star|director)(\/|\.|$)/i.test(path);
+}
+
+var responseCache = {};
+
+async function fetchUrl(url, headers, timeoutMs) {
+var response = await withTimeout(
+http_get(url, headers || {
+'User-Agent': 'Mozilla/5.0',
+'Accept': 'text/html,application/xhtml+xml'
+}),
+Number(timeoutMs) || TIMEOUT.page,
+url
+);
+
+if (
+!response ||
+(
+response.status &&
+(response.status < 200 || response.status >= 400)
+)
+) {
+throw new Error('HTTP ' + (response && response.status) + ' – ' + url);
+}
+
+return String(response.body || '');
+}
+
+// Tiny short-lived cache: home validation and section rows often ask
+// for the same page within one session.
+async function get(url, headers) {
+var key = String(url);
+var hit = responseCache[key];
+
+if (hit && Date.now() - hit.at < 60000) {
+return hit.body;
+}
+
+var body = await fetchUrl(url, headers, TIMEOUT.page);
+
+responseCache[key] = { body: body, at: Date.now() };
+
+var keys = Object.keys(responseCache);
+if (keys.length > 24) delete responseCache[keys[0]];
+
+return body;
+}
+
+function looksLikeListing(html) {
+return /class=["'][^"']*\brecent-movies\b/i.test(String(html || '')) ||
+/class=["'][^"']*\bthumb\b/i.test(String(html || ''));
+}
+
+// Ask HDHub4u's mirror service which host is live right now. All
+// endpoints are asked at once, so a slow or blocked one can no
+// longer hold up the home screen.
+async function resolveFromMirrorService() {
+var stamp = String(Math.floor(Date.now() / 3600000));
+
+var answers = await Promise.all(MIRROR_ENDPOINTS.map(async function (endpoint) {
+try {
+var body = await fetchUrl(
+endpoint + '?v=' + stamp,
+{ 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+TIMEOUT.mirror
+);
+
+var data = JSON.parse(body);
+
+// `c` is the full site URL, `h` only the host.
+var candidates = [data && data.c, data && data.h];
+
+for (var i = 0; i < candidates.length; i++) {
+if (!candidates[i]) continue;
+
+var decoded = safeAtob(String(candidates[i])).trim();
+if (!decoded) continue;
+
+var url = /^https?:\/\//i.test(decoded) ? decoded : 'https://' + decoded;
+var host = originHost(url);
+
+if (host && /hdhub4u\./i.test(host)) {
+log('mirror service says ' + host);
+return 'https://' + host;
+}
+}
+} catch (error) {
+log('mirror endpoint failed: ' + endpoint + ' – ' + String(error.message || error));
+}
+
+return '';
+}));
+
+for (var i = 0; i < answers.length; i++) {
+if (answers[i]) return answers[i];
+}
+
+return '';
+}
+
+async function ensureOrigin(force) {
+if (!force && siteOrigin && Date.now() - originAt < ORIGIN_TTL_MS) {
+return siteOrigin;
+}
+
+if (originPending) return originPending;
+
+originPending = (async function () {
+// 1. Does baseUrl itself serve the real site?
+try {
+var home = await fetchUrl(base() + '/', null, TIMEOUT.mirror);
+
+if (looksLikeListing(home)) {
+siteOrigin = base();
+originAt = Date.now();
+log('using baseUrl: ' + siteOrigin);
+return siteOrigin;
+}
+
+log('baseUrl ' + originHost(base()) + ' is a landing page, asking the mirror service');
+} catch (error) {
+log('baseUrl check failed: ' + String(error.message || error));
+}
+
+// 2. Ask HDHub4u's mirror service.
+var resolved = '';
+
+try {
+resolved = await resolveFromMirrorService();
+} catch (error) {
+log('mirror lookup failed: ' + String(error.message || error));
+}
+
+if (resolved) {
+siteOrigin = resolved;
+originAt = Date.now();
+return siteOrigin;
+}
+
+// 3. Give up gracefully and keep using baseUrl.
+siteOrigin = base();
+originAt = Date.now();
+log('no live mirror found, falling back to ' + siteOrigin);
+return siteOrigin;
+})();
+
+try {
+return await originPending;
+} finally {
+originPending = null;
+}
+}
+
+// =====================================
+// TITLES
+// =====================================
+
+function cleanTitle(value) {
+return text(value)
+// <i class="material-icons">&#xE02C;</i> glyphs and bidi marks sit
+// inside the <h1>, so drop those ranges.
+.replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+.replace(/[\ue000-\uf8ff]/g, '')
+.replace(/^download\s+/i, '')
+.trim();
+}
+
+// "The Great Indian Kapil Show (Season 5) WEB-DL [Hindi DD5.1] 4K
+//  1080p 720p & 480p [x264/HEVC] HD | [NF Series] [EP-09 Added]"
+// -> "The Great Indian Kapil Show (Season 5)"
+var TITLE_CUT = new RegExp(
+'\\b(?:4K|2160p|1440p|1080p|720p|540p|480p|WEB[ -]?DL|WEB[ -]?Rip|' +
+'BluRay|Blu[ -]?ray|BRRip|HDRip|HDTS|DVDRip|DVDScr|PRE[ -]?DVD|' +
+'HDR|HQ|CAM|HDCAM|HDTC|HEVC|x264|x265|10Bit|AAC|DD5\\.1|DS4K|UHD|' +
+'UNCUT|UNRATED|iMAX|PRE[ -]?Release|Dual[ -]?Audio|ESubs|MSubs|' +
+'Multi[ -]?Audio|' +
+'Hindi[ -]?Dubbed|NF[ -]?Series|Full[ -]?Movie|Full[ -]?Series|' +
+'Complete[ -]?Series)\\b',
+'i'
+);
+
+function shortTitle(value) {
+var title = cleanTitle(value);
+
+if (!SHORT_TITLES) return title;
+
+var match = title.match(TITLE_CUT);
+
+if (match && match.index >= 3) {
+title = title.slice(0, match.index);
+}
+
+var previous;
+do {
+previous = title;
+title = title
+.replace(/[\s\-–—|:,&+/*\[\(\{]+$/, '')
+.replace(/\s+V\d+$/i, '')
+.replace(/\s+(?:Hindi|English|Tamil|Telugu|Malayalam|Kannada|Punjabi|Dual|Dubbed|HD|HQ)$/i, '')
+.trim();
+} while (title !== previous);
+
+return title.length >= 2 ? title : cleanTitle(value);
+}
+
+function kind(title, url) {
+var value = String(title || '') + ' ' + String(url || '');
+
+if (/\b(?:season\s*\d{1,2}|s\d{1,2}\s*[._-]?\s*e\d{1,3}|episodes?)\b/i.test(value)) {
+return 'series';
+}
+
+if (/\bfull[ -]?movies?\b/i.test(value)) {
+return 'movie';
+}
+
+return /\b(series|tv[ -]?shows?|web[ -]?series|reality[ -]?shows?|game[ -]?shows?|talk[ -]?shows?|k[ -]?dramas?|c[ -]?dramas?)\b/i.test(value)
+? 'series'
+: 'movie';
+}
+
+function yearOf(title) {
+var value = String(title || '');
+var bracketed = value.match(/\((19\d{2}|20\d{2})\)/);
+
+if (bracketed) return Number(bracketed[1]);
+
+var all = value.match(/\b(?:19\d{2}|20\d{2})\b/g);
+
+return all && all.length ? Number(all[all.length - 1]) : undefined;
+}
+
+function tmdbSize(url, size) {
+return String(url || '').replace(
+/^(https:\/\/image\.tmdb\.org\/t\/p\/)[a-z0-9]+(\/[A-Za-z0-9]+\.(?:jpe?g|png|webp))$/i,
+'$1' + size + '$2'
+);
+}
+
+function qualityOf(label) {
+var match = String(label || '').match(/\b(2160p|1440p|1080p|720p|480p|4k|2k)\b/i);
+
+if (!match) return '';
+
+var value = match[1].toLowerCase();
+
+return value === '4k' ? '2160p' : value === '2k' ? '1440p' : value;
+}
+
+function qualityRank(label) {
+var value = String(label || '').toUpperCase();
+
+if (value.indexOf('2160') >= 0 || value.indexOf('4K') >= 0) return 2160;
+if (value.indexOf('1440') >= 0 || value.indexOf('2K') >= 0) return 1440;
+if (value.indexOf('1080') >= 0) return 1080;
+if (value.indexOf('720') >= 0) return 720;
+if (value.indexOf('480') >= 0) return 480;
+
+return 0;
+}
+
+function formatSize(bytes) {
+if (!(bytes > 0)) return '';
+var units = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+return (i ? bytes.toFixed(2).replace(/\.00$/, '') : String(bytes)) + ' ' + units[i];
+}
+
+// =====================================
+// LISTINGS
+// =====================================
+
+// Every HDHub4u result page renders post cards as
+//   <ul class="recent-movies">
+//     <li class="thumb"><figure><a href="/slug/">
+//       <img class="nx-poster" src="…" alt="TITLE"></a></figure>
+//     <figcaption>…</figcaption></li>
+//   </ul>
+// Reading inside that list keeps menus, ads and sidebars out.
+function listingScope(html) {
+var chunks = [];
+var listRe = /<ul\b[^>]*class=["'][^"']*\brecent-movies\b[^"']*["'][^>]*>([\s\S]*?)<\/ul>/gi;
+var m;
+
+while ((m = listRe.exec(html)) !== null) {
+chunks.push(m[1]);
+}
+
+if (chunks.length) return chunks.join('\n');
+
+// Fallback: collect the cards themselves.
+var cards = html.match(/<li\b[^>]*class=["'][^"']*\bthumb\b[^"']*["'][^>]*>[\s\S]*?<\/li>/gi);
+
+return cards && cards.length ? cards.join('\n') : '';
+}
+
+function listings(html) {
+var items = [];
+var seen = {};
+var scope = listingScope(html);
+
+if (!scope) {
+throw new Error('Post list not found; the site layout may have changed');
+}
+
+var anchors = scope.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+
+anchors.forEach(function (anchor) {
+var opening = (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
+var href = absolute(attr(opening, 'href'));
+
+if (!href || !isPostPage(href) || seen[href]) return;
+
+// Only the poster anchor carries the image; the figcaption anchor
+// repeats the same link and is skipped here.
+var image = (anchor.match(/<img\b[^>]*>/i) || [])[0] || '';
+if (!image) return;
+
+var rawTitle = cleanTitle(
+attr(image, 'alt') ||
+attr(image, 'title') ||
+attr(opening, 'aria-label') ||
+text(anchor)
+);
+
+var poster = absolute(
+attr(image, 'data-src') ||
+attr(image, 'data-lazy-src') ||
+attr(image, 'src')
+);
+
+if (!rawTitle || !poster) return;
+
+seen[href] = true;
+
+items.push(new MultimediaItem({
+title: shortTitle(rawTitle),
+url: href,
+posterUrl: tmdbSize(poster, 'w500'),
+type: kind(rawTitle, href),
+year: yearOf(rawTitle)
+}));
+});
+
+return items;
+}
+
+function meta(html, key) {
+var tags = html.match(/<meta\b[^>]*>/gi) || [];
+
+for (var i = 0; i < tags.length; i++) {
+var name = attr(tags[i], 'property') || attr(tags[i], 'name');
+
+if (name && name.toLowerCase() === key.toLowerCase()) {
+return attr(tags[i], 'content');
+}
+}
+
+return '';
+}
+
+// =====================================
+// HOME
+// =====================================
+
+function homeSections() {
+var rows = [];
+var latest = HOME_LAYOUT.latest;
+var tv = HOME_LAYOUT.tvShows;
+
+if (latest && latest.path) {
+rows.push({
+name: latest.title,
+path: latest.path,
+limit: Number(latest.limit) || 0,
+seriesOnly: false
+});
+}
+
+if (tv && Array.isArray(tv.channels)) {
+tv.channels.forEach(function (channel) {
+if (!channel || !channel.path) return;
+
+rows.push({
+name: tv.grouped
+? tv.title + ' \u00b7 ' + channel.title
+: channel.title,
+path: channel.path,
+limit: Number(channel.limit || tv.limit) || 0,
+seriesOnly: channel.seriesOnly !== undefined
+? !!channel.seriesOnly
+: !!tv.seriesOnly
+});
+});
+}
+
+return rows;
+}
+
+async function loadHomeRows(rows) {
+return Promise.all(rows.map(async function (row) {
+try {
+var items = listings(await get(origin() + row.path));
+
+if (row.seriesOnly) {
+items = items.filter(function (item) {
+return item.type === 'series';
+});
+}
+
+return {
+name: row.name,
+items: row.limit > 0 ? items.slice(0, row.limit) : items,
+error: null
+};
+} catch (error) {
+reportError('Home row "' + row.name + '": ' + String(error));
+return { name: row.name, items: [], error: error };
+}
+}));
+}
+
+async function getHome(callback) {
+var rows = homeSections();
+var done = false;
+var watchdog = null;
+
+// The callback is answered exactly once – including when a host
+// stops responding, which is what makes a plugin test print
+// "No Output" instead of an error.
+function finish(result) {
+if (done) return;
+
+done = true;
+
+if (watchdog && typeof clearTimeout === 'function') {
+clearTimeout(watchdog);
+}
+
+callback(result);
+}
+
+if (typeof setTimeout === 'function') {
+watchdog = setTimeout(function () {
+log('home: watchdog fired');
+finish({
+success: false,
+errorCode: 'UNKNOWN_ERROR',
+message: 'Timed out while loading the home screen. ' +
+'Check the connection and try again.'
+});
+}, TIMEOUT.watchdog);
+}
+
+try {
+log('home: resolving site origin');
+await ensureOrigin(false);
+log('home: origin = ' + origin());
+
+var results = await loadHomeRows(rows);
+var total = results.reduce(function (sum, result) {
+return sum + result.items.length;
+}, 0);
+
+// A stale mirror answers 200 with an empty page, so retry once on a
+// freshly resolved origin before reporting a failure. No point
+// retrying when no mirror was ever found.
+if (!total && origin() !== base()) {
+log('home: no items, re-resolving the mirror and retrying');
+await ensureOrigin(true);
+log('home: retry origin = ' + origin());
+
+results = await loadHomeRows(rows);
+}
+
+var data = {};
+
+results.forEach(function (result) {
+log('home: "' + result.name + '" -> ' + result.items.length + ' items' +
+(result.error ? ' (error: ' + String(result.error.message || result.error) + ')' : ''));
+
+if (result.items.length) data[result.name] = result.items;
+});
+
+if (!Object.keys(data).length) {
+// baseUrl never resolved to a working mirror: say so instead of
+// blaming the page layout.
+if (origin() === base()) {
+throw new Error('No live HDHub4u mirror found. ' + originHost(base()) +
+' is a landing page and the mirror service did not answer – ' +
+'check the connection and try again.');
+}
+
+var firstError = results.find(function (result) {
+return result.error;
+});
+
+throw firstError && firstError.error
+? firstError.error
+: new Error('No home items found');
+}
+
+finish({ success: true, data: data });
+} catch (error) {
+log('home: failed – ' + String(error && error.message ? error.message : error));
+
+finish({
+success: false,
+errorCode: 'UNKNOWN_ERROR',
+message: String(error && error.message ? error.message : error)
+});
+}
+}
+
+// =====================================
+// SEARCH
+// =====================================
+
+// The site's search box ( /search.html ) queries a Typesense proxy.
+var SEARCH_ENDPOINT =
+'https://search.pingora.fyi/collections/post/documents/search';
+
+function searchItem(document) {
+if (!document) return null;
+
+var href = absolute(document.permalink || '');
+
+if (!href || !isPostPage(href)) return null;
+
+var rawTitle = cleanTitle(document.post_title || '');
+if (!rawTitle) return null;
+
+return new MultimediaItem({
+title: shortTitle(rawTitle),
+url: href,
+posterUrl: absolute(document.post_thumbnail || ''),
+type: kind(rawTitle, href),
+year: yearOf(rawTitle)
+});
+}
+
+async function search(query, page, callback) {
+if (typeof page === 'function') {
+callback = page;
+page = 1;
+}
+
+try {
+var term = String(query || '').trim();
+
+if (!term) {
+return callback({ success: true, data: [] });
+}
+
+var pageNumber = Math.max(1, parseInt(page, 10) || 1);
+
+await ensureOrigin(false);
+
+var body = await fetchUrl(
+SEARCH_ENDPOINT +
+'?q=' + encodeURIComponent(term) +
+'&query_by=' + encodeURIComponent('post_title,category,stars,director,imdb_id') +
+'&query_by_weights=4,2,2,2,4' +
+'&sort_by=' + encodeURIComponent('sort_by_date:desc') +
+'&limit=30' +
+'&page=' + pageNumber +
+'&highlight_fields=none' +
+'&use_cache=true',
+{
+'User-Agent': 'Mozilla/5.0',
+'Accept': 'application/json',
+'Referer': origin() + '/',
+'Origin': origin()
+}
+);
+
+var response = JSON.parse(body);
+var hits = (response && response.hits) || [];
+var seen = {};
+
+var results = hits
+.map(function (hit) {
+var item = searchItem(hit && hit.document ? hit.document : hit);
+
+if (!item || seen[item.url]) return null;
+
+seen[item.url] = true;
+return item;
+})
+.filter(function (item) {
+return item !== null;
+});
+
+callback({ success: true, data: results });
+} catch (error) {
+fail(callback, error);
+}
+}
+
+// =====================================
+// POST PAGE BUTTONS
+// =====================================
+
+var PLAY_HOST = /^https?:\/\/(?:www\.)?(?:playdrive|play4u)\.[a-z]+\//i;
+var FILE_HOST = /^https?:\/\/(?:www\.)?hubdrive\.[a-z]+\/file\//i;
+var DRIVE_HOST = /^https?:\/\/(?:www\.)?hubcloud\.[a-z]+\/drive\//i;
+var GENERATE_HOST = /^https?:\/\/gamerxyt\.com\/hubcloud\.php\?/i;
+
+// Download-only hosts this version recognises but cannot resolve.
+var BLOCKED_HOST = /^https?:\/\/(?:www\.)?(?:greenmotors\.[a-z]+|hdstream4u\.[a-z]+|hubstream\.[a-z]+|hubdrive\.[a-z]+\/(?!file\/)|vidaraa\.[a-z]+)\//i;
+
+function pageUrl(raw, page) {
+raw = decode(raw || '').trim();
+
+if (!raw) return '';
+if (/^https?:\/\//i.test(raw)) return raw;
+if (raw.indexOf('//') === 0) return 'https:' + raw;
+
+var originMatch = String(page || '').match(/^https?:\/\/[^/]+/i);
+
+if (raw.charAt(0) === '/') {
+return (originMatch ? originMatch[0] : origin()) + raw;
+}
+
+return '';
+}
+
+// Every anchor on a post page, with the quality of the heading it
+// sits under" – so "1080p WEB-DL [6.3GB]" buttons are labelled 1080p.
+function pageButtons(html, page) {
+var events = [];
+var m;
+
+var headingRe = /<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]\s*>/gi;
+
+while ((m = headingRe.exec(html)) !== null) {
+var quality = qualityOf(text(m[0]));
+if (quality) events.push({ index: m.index, quality: quality });
+}
+
+var anchorRe = /<a\b[^>]*>[\s\S]*?<\/a\s*>/gi;
+
+while ((m = anchorRe.exec(html)) !== null) {
+var href = pageUrl(attr((m[0].match(/^<a\b[^>]*>/i) || [])[0], 'href'), page);
+
+if (href && !isSiteUrl(href)) {
+events.push({
+index: m.index,
+url: href,
+label: text(m[0]),
+quality: qualityOf(text(m[0]))
+});
+}
+}
+
+events.sort(function (a, b) { return a.index - b.index; });
+
+var current = '';
+var out = [];
+
+events.forEach(function (event) {
+if (event.quality && !event.url) {
+current = event.quality;
+return;
+}
+
+if (!event.url) return;
+
+out.push({
+url: event.url,
+label: event.label || '',
+quality: event.quality || current || ''
+});
+});
+
+return out;
+}
+
+function uniqueBy(items, key) {
+var seen = {};
+
+return items.filter(function (item) {
+var value = key(item);
+
+if (!value || seen[value]) return false;
+
+seen[value] = true;
+return true;
+});
+}
+
+// =====================================
+// SERIES EPISODES
+// =====================================
+
+function seasonOf(title, html) {
+var source = String(title || '') + ' ' + String(html || '');
+var match =
+source.match(/\bseason\s*(\d{1,2})\b/i) ||
+source.match(/\bs(\d{1,2})\s*[._-]?\s*e\d{1,3}\b/i) ||
+source.match(/\/s-(\d{1,2})\//i);
+
+return match ? Number(match[1]) : 1;
+}
+
+function episodeFromUrl(url) {
+var match = String(url || '').match(/\/s-(\d{1,2})\/ep-(\d{1,3})/i);
+
+if (!match) return null;
+
+return { season: Number(match[1]), episode: Number(match[2]) };
+}
+
+function seriesEpisodes(html, postUrl, title) {
+var buttons = pageButtons(html, postUrl);
+var fallbackSeason = seasonOf(title, html);
+var watch = [];
+var loose = [];
+var packs = [];
+
+buttons.forEach(function (button) {
+if (PLAY_HOST.test(button.url)) {
+var numbers = episodeFromUrl(button.url);
+
+if (numbers) {
+watch.push({
+url: button.url,
+season: numbers.season,
+episode: numbers.episode
+});
+} else {
+loose.push(button);
+}
+} else if (FILE_HOST.test(button.url)) {
+packs.push(button);
+}
+});
+
+var list = [];
+var seen = {};
+
+// Per-episode watch links are the playable ones, so they win.
+watch
+.sort(function (a, b) {
+return a.season - b.season || a.episode - b.episode;
+})
+.forEach(function (entry) {
+var key = entry.season + ':' + entry.episode;
+
+if (seen[key]) return;
+seen[key] = true;
+
+list.push(new Episode({
+name: 'Episode ' + entry.episode,
+url: entry.url,
+season: entry.season,
+episode: entry.episode
+}));
+});
+
+// No per-episode links: the post only offers whole-season packs, so
+// label them as such instead of numbering them as episodes.
+if (!list.length) {
+uniqueBy(packs, function (pack) { return pack.url; })
+.forEach(function (pack, index) {
+var quality = pack.quality || qualityOf(pack.label) || '';
+
+list.push(new Episode({
+name: 'Full Season' + (quality ? ' \u00b7 ' + quality : ''),
+url: pack.url,
+season: fallbackSeason,
+episode: index + 1
+}));
+});
+}
+
+// Season-level watch link with no episode numbers (an "open the
+// player" button).
+if (!list.length && loose.length) {
+list.push(new Episode({
+name: 'Watch Online',
+url: loose[0].url,
+season: fallbackSeason,
+episode: 1
+}));
+}
+
+return list;
+}
+
+// =====================================
+// STREAM RESOLVERS
+// =====================================
+
+function extractR2(html) {
+var urls = [];
+var re = /https:\/\/[A-Za-z0-9-]+\.r2\.cloudflarestorage\.com\/[^\s"'<>\\]+/gi;
+var m;
+
+while ((m = re.exec(String(html || ''))) !== null) {
+var url = decode(m[0]).replace(/&amp;/g, '&');
+
+if (urls.indexOf(url) < 0) urls.push(url);
+}
+
+return urls;
+}
+
+function extractPixelDrain(html) {
+var ids = [];
+var re = /https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)/gi;
+var m;
+
+while ((m = re.exec(String(html || ''))) !== null) {
+if (ids.indexOf(m[1]) < 0) ids.push(m[1]);
+}
+
+return ids;
+}
+
+async function resolvePixelDrain(id) {
+var response = await http_get(
+'https://pixeldrain.dev/api/file/' + id + '/info',
+{ 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+);
+
+if (!response || response.status < 200 || response.status >= 300) {
+throw new Error('PixelDrain metadata HTTP ' + (response && response.status));
+}
+
+var info = JSON.parse(String(response.body || ''));
+var mime = String((info && info.mime_type) || '');
+
+if (!info || info.success !== true || info.can_download === false || !/^video\//i.test(mime)) {
+throw new Error('PixelDrain file is not a playable video');
+}
+
+return {
+url: 'https://pixeldrain.dev/api/file/' + id,
+size: formatSize(Number(info.size))
+};
+}
+
+// hubdrive.* /file/<id>  ->  the hubcloud drive page for that file.
+async function nextFromHubDrive(url) {
+var html = await get(url);
+var buttons = pageButtons(html, url);
+
+for (var i = 0; i < buttons.length; i++) {
+if (DRIVE_HOST.test(buttons[i].url) || GENERATE_HOST.test(buttons[i].url)) {
+return buttons[i].url;
+}
+}
+
+var r2 = extractR2(html);
+if (r2.length) return '';
+
+throw new Error('HubDrive file page has no download server');
+}
+
+// hubcloud.* /drive/<id>  ->  the "Generate Direct Download Link" URL.
+function generateLink(html) {
+var anchors = html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+
+for (var i = 0; i < anchors.length; i++) {
+var href = attr((anchors[i].match(/^<a\b[^>]*>/i) || [])[0], 'href');
+
+if (href && GENERATE_HOST.test(href)) return href;
+}
+
+var match = String(html).match(/https:\/\/gamerxyt\.com\/hubcloud\.php\?[^\s"'<>\\]+/i);
+
+return match ? decode(match[0]) : '';
+}
+
+async function resolveHubCloud(url, quality) {
+var html = await get(url);
+
+var streams = [];
+var r2 = extractR2(html);
+var fileName = text((html.match(/<title\b[^>]*>[\s\S]*?<\/title>/i) || [])[0] || '');
+var label = quality || qualityOf(fileName) || 'Auto';
+
+if (r2.length) {
+streams.push({ url: r2[0], quality: label, source: 'HubCloud · R2' });
+return streams;
+}
+
+var link = generateLink(html);
+
+if (!link) {
+throw new Error('HubCloud generate link not found');
+}
+
+var generated = await get(link, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': url
+});
+
+var direct = extractR2(generated);
+
+direct.forEach(function (value) {
+streams.push({ url: value, quality: label, source: 'HubCloud · R2' });
+});
+
+var pixelIds = extractPixelDrain(generated);
+
+for (var i = 0; i < pixelIds.length && streams.length < 3; i++) {
+try {
+var pixel = await resolvePixelDrain(pixelIds[i]);
+
+streams.push({
+url: pixel.url,
+quality: label,
+source: 'Pixel Server' + (pixel.size ? ' · ' + pixel.size : '')
+});
+} catch (error) {
+reportError('PixelDrain mirror skipped: ' + String(error));
+}
+}
+
+if (!streams.length) {
+throw new Error('HubCloud direct link not found');
+}
+
+return streams;
+}
+
+// playdrive.* /e/<id>/s-05/ep-01  ->  the matching play4u episode page.
+function play4uEpisodeFrom(html, playdriveUrl) {
+var seriesUrl = '';
+var anchors = html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+
+for (var i = 0; i < anchors.length; i++) {
+var href = attr((anchors[i].match(/^<a\b[^>]*>/i) || [])[0], 'href');
+
+if (/^https?:\/\/(?:www\.)?play4u\.[a-z]+\//i.test(href)) {
+seriesUrl = href;
+break;
+}
+}
+
+if (!seriesUrl) {
+var inline = String(html).match(/https?:\/\/(?:www\.)?play4u\.[a-z]+\/series\/[^\s"'<>\\]+/i);
+if (inline) seriesUrl = inline[0];
+}
+
+if (!seriesUrl) return '';
+
+var baseUrl = seriesUrl.split('#')[0].replace(/\/+$/, '');
+var episodePath = String(playdriveUrl).match(/\/s-(\d{1,2})\/ep-(\d{1,3})/i);
+
+if (!episodePath) return baseUrl;
+
+function pad(value) {
+return String(value).length < 2 ? '0' + value : String(value);
+}
+
+return baseUrl + '/s-' + pad(episodePath[1]) + '/ep-' + pad(episodePath[2]);
+}
+
+async function resolvePlay4u(url) {
+var html = await get(url, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': 'https://play4u.org/'
+});
+
+var keyMatch = html.match(/__PA_SEAL_KEY__\s*=\s*"([^"]+)"/);
+var key = keyMatch ? keyMatch[1] : 'pa4u-stream-seal-v1';
+
+var playMatch = html.match(/__PA_PLAY__\s*=\s*(\{[\s\S]*?\})\s*;\s*\n/);
+
+if (!playMatch) {
+throw new Error('Player data not found on the play4u page');
+}
+
+var data;
+
+try {
+data = JSON.parse(playMatch[1]);
+} catch (error) {
+throw new Error('Player data could not be read');
+}
+
+var streams = (data && data.streams) || [];
+var item = (data && data.item) || {};
+var qualities = (item.qualities || [])
+.map(function (quality) { return quality && quality.label; })
+.filter(Boolean);
+
+if (!streams.length) {
+throw new Error('No stream listed for this episode');
+}
+
+var out = [];
+
+streams.forEach(function (stream) {
+var sealed = stream.m3u8_url || stream.video_url || '';
+var url = unseal(sealed, key);
+
+if (!/^https?:\/\//i.test(url)) return;
+
+out.push({
+url: url,
+quality: qualities.length
+? qualities[qualities.length - 1]
+: 'Auto',
+source: 'Play4u · HLS' + (qualities.length ? ' (' + qualities.join('/') + ')' : ''),
+// The HLS host answers only with this Referer.
+headers: { Referer: 'https://play4u.org/' }
+});
+});
+
+if (!out.length) {
+throw new Error('Stream link could not be unsealed');
+}
+
+return out;
+}
+
+async function resolvePlayDrive(url, quality) {
+var html = await get(url, {
+'User-Agent': 'Mozilla/5.0',
+'Referer': origin() + '/'
+});
+
+var episodeUrl = play4uEpisodeFrom(html, url);
+
+if (!episodeUrl) {
+throw new Error('play4u episode page not found');
+}
+
+var streams = await resolvePlay4u(episodeUrl);
+
+if (quality) {
+streams.forEach(function (stream) {
+if (!stream.quality || stream.quality === 'Auto') stream.quality = quality;
+});
+}
+
+return streams;
+}
+
+// Resolve any URL this plugin understands into playable streams.
+async function resolveStreams(url, quality, depth) {
+if (depth > 4) return [];
+
+if (FILE_HOST.test(url)) {
+var next = await nextFromHubDrive(url);
+
+if (next) return resolveStreams(next, quality, depth + 1);
+
+return resolveHubCloud(url, quality);
+}
+
+if (DRIVE_HOST.test(url)) {
+return resolveHubCloud(url, quality);
+}
+
+if (GENERATE_HOST.test(url)) {
+return resolveHubCloud(url, quality);
+}
+
+if (/^https?:\/\/(?:www\.)?play4u\.[a-z]+\//i.test(url)) {
+return resolvePlay4u(url);
+}
+
+if (PLAY_HOST.test(url)) {
+return resolvePlayDrive(url, quality);
+}
+
+return [];
+}
+
+// =====================================
+// DETAIL
+// =====================================
+
+async function load(url, callback) {
+try {
+await ensureOrigin(false);
+
+if (!isSiteUrl(url)) {
+throw new Error('Not a page on HDHub4u');
+}
+
+var page = origin() + sitePath(url);
+var html = await get(page);
+
+var rawTitle = cleanTitle(
+(html.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i) || [])[0] ||
+meta(html, 'og:title')
+);
+
+if (!rawTitle) {
+throw new Error('Could not find title');
+}
+
+var imageTag =
+(html.match(/<meta\b(?=[^>]*\bitemprop=["']image["'])[^>]*>/i) || [])[0];
+
+var posterUrl = attr(imageTag, 'content') || meta(html, 'og:image');
+var itemType = kind(rawTitle, page);
+
+var episodes = itemType === 'movie'
+? [
+new Episode({
+name: 'Full Movie',
+url: page,
+season: 1,
+episode: 1
+})
+]
+: seriesEpisodes(html, page, rawTitle);
+
+callback({
+success: true,
+data: new MultimediaItem({
+title: shortTitle(rawTitle),
+url: page,
+posterUrl: tmdbSize(absolute(posterUrl), 'w500'),
+bannerUrl: tmdbSize(absolute(posterUrl), 'w1280'),
+type: itemType,
+year: yearOf(rawTitle),
+description: meta(html, 'description') || meta(html, 'og:description'),
+episodes: episodes
+})
+});
+} catch (error) {
+fail(callback, error);
+}
+}
+
+// =====================================
+// STREAMS
+// =====================================
+
+async function loadStreams(url, callback) {
+try {
+await ensureOrigin(false);
+
+url = String(url || '').trim();
+
+// Already a playable file.
+if (/^https?:\/\/[^\s]+\.(?:mp4|m3u8|mkv)(?:[?#].*)?$/i.test(url) ||
+/^https:\/\/[A-Za-z0-9-]+\.r2\.cloudflarestorage\.com\//i.test(url) ||
+/^https:\/\/[A-Za-z0-9-]+\.r2\.dev\//i.test(url)) {
+return callback({
+success: true,
+data: [new StreamResult({ url: url, source: 'Direct', quality: 'Auto' })]
+});
+}
+
+var collected = [];
+var blocked = 0;
+var failures = 0;
+var quality = '';
+
+// A direct host page (episode link, file page, player page).
+if (!isSiteUrl(url)) {
+if (BLOCKED_HOST.test(url)) {
+return callback({
+success: false,
+errorCode: 'UNKNOWN_ERROR',
+message:
+'This link points to an ad-gated download host that the ' +
+'plugin cannot open directly. Use the play button on the ' +
+'post page instead.'
+});
+}
+
+try {
+collected = await resolveStreams(url, '', 0);
+} catch (error) {
+failures++;
+reportError('Resolve failed: ' + String(error));
+}
+} else {
+// A post page: gather every button that leads to a known host.
+var page = origin() + sitePath(url);
+var html = await get(page);
+var buttons = uniqueBy(
+pageButtons(html, page).filter(function (button) {
+return PLAY_HOST.test(button.url) ||
+FILE_HOST.test(button.url) ||
+DRIVE_HOST.test(button.url) ||
+GENERATE_HOST.test(button.url);
+}),
+function (button) { return button.url; }
+);
+
+if (buttons.length) {
+quality = buttons[0].quality || qualityOf(html);
+}
+
+// Watch links resolve to HLS, file links to full-quality files;
+// best quality first.
+var ordered = buttons.slice().sort(function (a, b) {
+return qualityRank(b.quality) - qualityRank(a.quality);
+});
+
+// A series post lists one button per episode. Each episode is a
+// separate playable, so resolve only the first one instead of
+// returning nine different episodes as if they were qualities.
+var pageTitle = cleanTitle(
+(html.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i) || [])[0] ||
+meta(html, 'og:title')
+);
+
+if (kind(pageTitle, page) === 'series') {
+var watchButtons = ordered.filter(function (button) {
+return PLAY_HOST.test(button.url);
+});
+
+ordered = watchButtons.length
+? watchButtons.slice(0, 1)
+: ordered.slice(0, 1);
+}
+
+var limited = ordered.slice(0, 6);
+
+for (var i = 0; i < limited.length; i++) {
+try {
+var streams = await resolveStreams(
+limited[i].url,
+limited[i].quality || quality,
+0
+);
+
+streams.forEach(function (stream) {
+if (!stream.quality || stream.quality === 'Auto') {
+stream.quality = limited[i].quality || quality || 'Auto';
+}
+collected = collected.concat(stream);
+});
+} catch (error) {
+failures++;
+reportError('Button resolve failed: ' + String(error));
+}
+}
+
+if (!buttons.length) {
+// No HDHub4u host buttons at all: is it a download-only post?
+if (/greenmotors\.[a-z]+\/\?id=|hdstream4u\.[a-z]+\/file\/|hubstream\.[a-z]+\/#/i.test(html)) {
+blocked++;
+}
+}
+}
+
+var seen = {};
+
+var streams = collected
+.filter(function (stream) {
+if (!stream || !stream.url) return false;
+
+// Ignore the query string when de-duplicating: the same file can be
+// handed out with two different presigned signatures.
+var key = stream.url.split('?')[0];
+
+if (seen[key]) return false;
+
+seen[key] = true;
+return true;
+})
+.sort(function (a, b) {
+return qualityRank(b.quality) - qualityRank(a.quality);
+})
+.map(function (stream) {
+return new StreamResult({
+url: stream.url,
+source: stream.source,
+quality: stream.quality || 'Auto',
+headers: stream.headers
+});
+});
+
+if (!streams.length) {
+return callback({
+success: false,
+errorCode: 'UNKNOWN_ERROR',
+message: blocked
+? 'This post only offers download links on ad-gated hosts ' +
+  '(greenmotors / hdstream4u / hubstream), which cannot be ' +
+  'opened in the app. Open the post on the website instead.'
+: failures
+? 'No direct stream found; a host page could not be loaded. ' +
+  'Try another quality or open the post on the website.'
+: 'No playable stream found for this title.'
+});
+}
+
+callback({ success: true, data: streams });
+} catch (error) {
+fail(callback, error);
+}
+}
+
+// =====================================
+// SKYSTREAM EXPORTS
+// =====================================
+
+globalThis.getHome = getHome;
+globalThis.search = search;
+globalThis.load = load;
+globalThis.loadStreams = loadStreams;
+
+log('exports registered: getHome, search, load, loadStreams');
 })();
