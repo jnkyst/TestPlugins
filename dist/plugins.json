@@ -119,7 +119,7 @@
   {
     "packageName": "com.jnkyst.repo.movielinkbd",
     "name": "MovieLinkBD",
-    "version": 1,
+    "version": 2,
     "baseUrl": "https://movielinkbd.com/",
     "description": "MovieLinkBD plugin for TestPlugins",
     "authors": [
