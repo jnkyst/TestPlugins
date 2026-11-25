@@ -28,7 +28,11 @@
 * Servers come from HDHub4u's generated page (HubCloud / FSL /
 * FSLv2 / Pixel); a server that is dead or missing is skipped.
 * Rows are ordered 720P, then 1080P, then 2160P, and inside a
-* resolution HubCloud -> FSL -> FSLv2 -> Pixel.
+* resolution FSL -> FSLv2 -> Pixel -> HubCloud.
+*
+* HUBDRIVE_ONLY (on by default) keeps the list to those file servers:
+* Play4u / HDStream player links are only used for titles that have no
+* HubDrive file at all, so nothing ends up with zero streams.
 *
 * HubDrive packs count too: a pack page (hubdrive /packs/<id>) lists
 * one file per episode, so every episode is matched to its own file
@@ -71,6 +75,12 @@ try {
 // =====================================
 
 var SHORT_TITLES = true; // false = keep the full scene-style titles
+
+// HubDrive file servers only (FSL, FSLv2, Pixel, HubCloud).
+// A player/HLS stream is listed only when a title has no HubDrive link
+// at all, so nothing becomes unplayable.
+// false = list every source again (HLS included).
+var HUBDRIVE_ONLY = true;
 
 var HOME_LAYOUT = {
   latest: {
@@ -1807,7 +1817,7 @@ return match ? decode(match[0]) : '';
 
 // The generated page lists one button per server for the same file,
 // so every server can be offered as its own stream with the file size.
-var SERVER_ORDER = ['HubCloud Server', 'FSL Server', 'FSLv2 Server', 'Pixel Server'];
+var SERVER_ORDER = ['FSL Server', 'FSLv2 Server', 'Pixel Server', 'HubCloud Server'];
 
 function serverNameFromLabel(label) {
 var value = String(label || '');
@@ -1817,6 +1827,16 @@ if (/\bfsl\b/i.test(value)) return 'FSL Server';
 if (/pixel/i.test(value)) return 'Pixel Server';
 if (/\bt3\b|hubcloud/i.test(value)) return 'HubCloud Server';
 return '';
+}
+
+function isHubDriveSource(source) {
+var value = String(source || '');
+
+for (var i = 0; i < SERVER_ORDER.length; i++) {
+if (value.indexOf(SERVER_ORDER[i]) === 0) return true;
+}
+
+return false;
 }
 
 function serverRank(source) {
@@ -2011,6 +2031,92 @@ return String(value).length < 2 ? '0' + value : String(value);
 return baseUrl + '/s-' + pad(episodePath[1]) + '/ep-' + pad(episodePath[2]);
 }
 
+// Resolve a relative playlist URI against the master playlist.
+function joinUrl(baseUrl, reference) {
+var ref = String(reference || '').trim();
+
+if (!ref) return '';
+if (/^https?:\/\//i.test(ref)) return ref;
+
+var origin = (String(baseUrl).match(/^https?:\/\/[^/]+/i) || [''])[0];
+
+if (ref.charAt(0) === '/') return origin + ref;
+
+var dir = String(baseUrl).replace(/[?#].*$/, '').replace(/\/[^/]*$/, '/');
+
+return dir + ref;
+}
+
+// One HLS master playlist -> the resolutions it offers.
+//   #EXT-X-STREAM-INF:...RESOLUTION=1920x1080
+//   /range/<token>
+// A resolution can be cropped (1920x800 is a 1080p film), so the
+// width decides when the height is not one of the usual numbers.
+function resolutionQuality(width, height) {
+var direct = qualityOf(height + 'p');
+
+if (direct) return direct;
+
+var w = Number(width) || 0;
+
+if (!w) return '';
+if (w >= 3400) return '2160p';
+if (w >= 2400) return '1440p';
+if (w >= 1800) return '1080p';
+if (w >= 1200) return '720p';
+if (w >= 800) return '480p';
+
+return '';
+}
+
+function hlsVariants(body, masterUrl) {
+var lines = String(body || '').split(/\r?\n/);
+var variants = [];
+var seen = {};
+
+for (var i = 0; i < lines.length; i++) {
+if (!/^#EXT-X-STREAM-INF/i.test(lines[i])) continue;
+
+var size = lines[i].match(/RESOLUTION=(\d+)x(\d+)/i) || [];
+var width = Number(size[1] || 0);
+var height = Number(size[2] || 0);
+var uri = '';
+
+for (var j = i + 1; j < lines.length; j++) {
+var line = String(lines[j] || '').trim();
+
+if (!line) continue;
+if (line.charAt(0) === '#') break;
+
+uri = line;
+break;
+}
+
+if (!uri) continue;
+
+var url = joinUrl(masterUrl, uri);
+var quality = resolutionQuality(width, height);
+
+if (!url || seen[url]) continue;
+
+seen[url] = true;
+variants.push({ url: url, quality: quality, width: width, height: height });
+}
+
+return variants;
+}
+
+async function play4uVariants(masterUrl, headers) {
+try {
+var body = await fetchUrl(masterUrl, headers, TIMEOUT.page);
+
+return hlsVariants(body, masterUrl);
+} catch (error) {
+log('play4u: variant list failed – ' + String(error.message || error));
+return [];
+}
+}
+
 async function resolvePlay4u(url) {
 var html = await get(url, {
 'User-Agent': 'Mozilla/5.0',
@@ -2046,23 +2152,64 @@ throw new Error('No stream listed for this episode');
 
 var out = [];
 
+// The HLS host answers only with this Referer.
+var streamHeaders = { Referer: 'https://play4u.org/' };
+var masters = [];
+
 streams.forEach(function (stream) {
 var sealed = stream.m3u8_url || stream.video_url || '';
-var url = unseal(sealed, key);
+var master = unseal(sealed, key);
 
-if (!/^https?:\/\//i.test(url)) return;
+if (!/^https?:\/\//i.test(master)) return;
+
+if (masters.indexOf(master) < 0) masters.push(master);
+});
+
+// Every master playlist is read once: it names the real resolutions.
+var offers = await Promise.all(
+masters.map(function (master) { return play4uVariants(master, streamHeaders); })
+);
+
+masters.forEach(function (master, index) {
+var variants = offers[index] || [];
+var known = variants
+.map(function (variant) { return variant.quality; })
+.filter(Boolean);
+
+// Adaptive first (the player picks the bitrate), then one row per
+// resolution the playlist really offers: 720P, 1080P, ...
+out.push({
+url: master,
+quality: 'Auto',
+source:
+'Play4u · HLS (adaptive' +
+(known.length ? ' ' + known.join('/').toUpperCase() : '') +
+')',
+headers: streamHeaders
+});
+
+variants.forEach(function (variant) {
+if (!variant.quality) return;
 
 out.push({
-url: url,
-quality: qualities.length
-? qualities[qualities.length - 1]
-: 'Auto',
-source:
-'Play4u · HLS' +
-(qualities.length ? ' (' + qualities.join('/').toUpperCase() + ')' : ''),
-// The HLS host answers only with this Referer.
-headers: { Referer: 'https://play4u.org/' }
+url: variant.url,
+quality: variant.quality,
+source: 'Play4u · HLS',
+headers: streamHeaders
 });
+});
+
+// Could not read the playlist: keep the qualities the page claims.
+if (!variants.length && qualities.length) {
+qualities.forEach(function (quality) {
+out.push({
+url: master,
+quality: quality,
+source: 'Play4u · HLS',
+headers: streamHeaders
+});
+});
+}
 });
 
 if (!out.length) {
@@ -2332,11 +2479,14 @@ message:
 });
 }
 
+// The episode carries its own HubDrive file: that is the source.
+if (!(HUBDRIVE_ONLY && extraPending)) {
 try {
 collected = await resolveStreams(url, '', 0);
 } catch (error) {
 failures++;
 reportError('Resolve failed: ' + String(error));
+}
 }
 } else {
 // A post page: gather every button that leads to a known host.
@@ -2352,6 +2502,15 @@ GENERATE_HOST.test(button.url);
 }),
 function (button) { return button.url; }
 );
+
+// File links beat watch links: with them the list is HubDrive only.
+if (HUBDRIVE_ONLY) {
+var fileButtons = buttons.filter(function (button) {
+return FILE_HOST.test(button.url);
+});
+
+if (fileButtons.length) buttons = fileButtons;
+}
 
 if (buttons.length) {
 quality = buttons[0].quality || qualityOf(html);
@@ -2425,7 +2584,7 @@ collected = collected.concat(await extraPending);
 
 var seen = {};
 
-var streams = collected
+var selected = collected
 .filter(function (stream) {
 if (!stream || !stream.url) return false;
 
@@ -2444,8 +2603,19 @@ qualityPriority(a.quality) - qualityPriority(b.quality) ||
 qualityRank(b.quality) - qualityRank(a.quality) ||
 serverRank(a.source) - serverRank(b.source)
 );
-})
-.map(function (stream) {
+});
+
+// HubDrive only: the player/HLS rows are dropped as soon as a file
+// server answered, and kept only when there is no file at all.
+if (HUBDRIVE_ONLY) {
+var hubStreams = selected.filter(function (stream) {
+return isHubDriveSource(stream.source);
+});
+
+if (hubStreams.length) selected = hubStreams;
+}
+
+var streams = selected.map(function (stream) {
 return new StreamResult({
 url: stream.url,
 source: stream.source,
