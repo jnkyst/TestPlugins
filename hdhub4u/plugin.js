@@ -27,6 +27,8 @@
 *   [1080p] Pixel Server · 8.96 GB
 * Servers come from HDHub4u's generated page (HubCloud / FSL /
 * FSLv2 / Pixel); a server that is dead or missing is skipped.
+* Rows are ordered 720P, then 1080P, then 2160P, and inside a
+* resolution HubCloud -> FSL -> FSLv2 -> Pixel.
 * Episodes that only offer a player page keep their HLS stream.
 *
 * ── PLAYBACK CHAINS (HDHub4u's own hosts) ─────────────────────
@@ -604,6 +606,13 @@ var value = match[1].toLowerCase();
 return value === '4k' ? '2160p' : value === '2k' ? '1440p' : value;
 }
 
+// Shown to the user: 720P / 1080P / 2160P.
+function displayQuality(label) {
+var value = String(label || '').trim();
+
+return value ? value.toUpperCase() : 'AUTO';
+}
+
 function qualityRank(label) {
 var value = String(label || '').toUpperCase();
 
@@ -614,6 +623,17 @@ if (value.indexOf('720') >= 0) return 720;
 if (value.indexOf('480') >= 0) return 480;
 
 return 0;
+}
+
+// Order the user asked for: 720P first, then 1080P, then 2160P.
+function qualityPriority(label) {
+var rank = qualityRank(label);
+
+if (rank === 720) return 0;
+if (rank === 1080) return 1;
+if (rank === 2160) return 2;
+if (!rank) return 9;   // Auto / unknown
+return 3;              // 480P, 1440P, anything else
 }
 
 function formatSize(bytes) {
@@ -1675,8 +1695,14 @@ fileName: fileName
 };
 }
 
-function labelWithSize(server, size) {
-return size ? server + ' · ' + size : server;
+function labelWithSize(server, size, quality) {
+var parts = [server];
+var resolution = displayQuality(quality);
+
+if (resolution && resolution !== 'AUTO') parts.push(resolution);
+if (size) parts.push(size);
+
+return parts.join(' · ');
 }
 
 // Parse every "Download [.. Server]" button of a generated page.
@@ -1726,7 +1752,7 @@ var streams = picked.map(function (entry) {
 return {
 url: entry.url,
 quality: label,
-source: labelWithSize(entry.server, size)
+source: labelWithSize(entry.server, size, label)
 };
 });
 
@@ -1736,7 +1762,7 @@ var pixel = await resolvePixelDrain(pixels[j]);
 streams.push({
 url: pixel.url,
 quality: label,
-source: labelWithSize('Pixel Server', size || pixel.size)
+source: labelWithSize('Pixel Server', size || pixel.size, label)
 });
 } catch (error) {
 // A dead or non-video pixel mirror is simply left out.
@@ -1790,7 +1816,7 @@ extractR2(html)
 streams.push({
 url: value,
 quality: base.quality || quality || 'Auto',
-source: labelWithSize('HubCloud Server', base.size)
+source: labelWithSize('HubCloud Server', base.size, base.quality || quality)
 });
 });
 }
@@ -1881,7 +1907,9 @@ url: url,
 quality: qualities.length
 ? qualities[qualities.length - 1]
 : 'Auto',
-source: 'Play4u · HLS' + (qualities.length ? ' (' + qualities.join('/') + ')' : ''),
+source:
+'Play4u · HLS' +
+(qualities.length ? ' (' + qualities.join('/').toUpperCase() + ')' : ''),
 // The HLS host answers only with this Referer.
 headers: { Referer: 'https://play4u.org/' }
 });
@@ -2155,6 +2183,7 @@ return true;
 })
 .sort(function (a, b) {
 return (
+qualityPriority(a.quality) - qualityPriority(b.quality) ||
 qualityRank(b.quality) - qualityRank(a.quality) ||
 serverRank(a.source) - serverRank(b.source)
 );
@@ -2163,7 +2192,7 @@ serverRank(a.source) - serverRank(b.source)
 return new StreamResult({
 url: stream.url,
 source: stream.source,
-quality: stream.quality || 'Auto',
+quality: displayQuality(stream.quality),
 headers: stream.headers
 });
 });
