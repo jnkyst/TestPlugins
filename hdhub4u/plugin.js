@@ -19,6 +19,16 @@
 *   TV Shows · SonyLiv        ->  /category/sonyliv/
 * All of it lives in HOME_LAYOUT below.
 *
+* ── STREAM LIST ───────────────────────────────────────────────
+* A movie / pack page is expanded into one stream per server and the
+* app shows quality + server + file size, e.g.
+*   [2160p] FSLv2 Server · 22.88 GB
+*   [1080p] HubCloud Server · 3.13 GB
+*   [1080p] Pixel Server · 8.96 GB
+* Servers come from HDHub4u's generated page (HubCloud / FSL /
+* FSLv2 / Pixel); a server that is dead or missing is skipped.
+* Episodes that only offer a player page keep their HLS stream.
+*
 * ── PLAYBACK CHAINS (HDHub4u's own hosts) ─────────────────────
 * Movies / packs:
 *   post page -> hubdrive.* /file/<id>
@@ -400,7 +410,6 @@ var url = /^https?:\/\//i.test(decoded) ? decoded : 'https://' + decoded;
 var host = originHost(url);
 
 if (host && /hdhub4u\./i.test(host)) {
-log('mirror service says ' + host);
 return 'https://' + host;
 }
 }
@@ -427,6 +436,7 @@ if (settled) return;
 
 if (answer) {
 settled = true;
+log('mirror service says ' + originHost(answer));
 resolve(answer);
 return;
 }
@@ -1625,50 +1635,164 @@ var match = String(html).match(/https:\/\/gamerxyt\.com\/hubcloud\.php\?[^\s"'<>
 return match ? decode(match[0]) : '';
 }
 
-async function resolveHubCloud(url, quality) {
-var html = await get(url);
+// The generated page lists one button per server for the same file,
+// so every server can be offered as its own stream with the file size.
+var SERVER_ORDER = ['HubCloud Server', 'FSL Server', 'FSLv2 Server', 'Pixel Server'];
 
-var streams = [];
-var r2 = extractR2(html);
-var fileName = text((html.match(/<title\b[^>]*>[\s\S]*?<\/title>/i) || [])[0] || '');
-var label = quality || qualityOf(fileName) || 'Auto';
+function serverNameFromLabel(label) {
+var value = String(label || '');
+if (/10gbps/i.test(value)) return '';
+if (/fslv2|fsl\s*v2/i.test(value)) return 'FSLv2 Server';
+if (/\bfsl\b/i.test(value)) return 'FSL Server';
+if (/pixel/i.test(value)) return 'Pixel Server';
+if (/\bt3\b|hubcloud/i.test(value)) return 'HubCloud Server';
+return '';
+}
 
-if (r2.length) {
-streams.push({ url: r2[0], quality: label, source: 'HubCloud · R2' });
+function serverRank(source) {
+var value = String(source || '');
+for (var i = 0; i < SERVER_ORDER.length; i++) {
+if (value.indexOf(SERVER_ORDER[i]) === 0) return i;
+}
+return SERVER_ORDER.length;
+}
+
+// File name, quality and size of one generated page.
+function fileMeta(html, fallbackQuality) {
+var source = String(html || '');
+var sizeMatch = source.match(/File Size\s*<i[^>]*>([^<]*)<\/i>/i);
+var size = sizeMatch ? text(sizeMatch[1]) : '';
+var header =
+(source.match(/class=["'][^"']*card-header[^"']*["'][^>]*>([\s\S]{0,400}?)<\/div>/i) || [])[1] ||
+(source.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i) || [])[1] ||
+'';
+var fileName = text(header);
+
+return {
+size: size,
+quality: qualityOf(fileName) || String(fallbackQuality || ''),
+fileName: fileName
+};
+}
+
+function labelWithSize(server, size) {
+return size ? server + ' · ' + size : server;
+}
+
+// Parse every "Download [.. Server]" button of a generated page.
+async function serversFromGenerated(html, fallback, quality) {
+var base = fileMeta(html, (fallback && fallback.quality) || quality);
+var size = base.size || (fallback && fallback.size) || '';
+var label = base.quality || (fallback && fallback.quality) || quality || 'Auto';
+var anchors = String(html || '').match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+var picked = [];
+var seen = {};
+
+// Pixel links are handed out in two steps: the button carries a shared
+// placeholder and a script right after it swaps in the real file (the
+// per-file one only ever appears inside that script), so the whole page
+// is scanned and every id is verified later.
+var pixels = [];
+var pixelRe = /pixeldrain\.(?:dev|com)\/u\/([A-Za-z0-9]+)/gi;
+var pixelMatch;
+
+while ((pixelMatch = pixelRe.exec(String(html || ''))) !== null) {
+if (pixels.indexOf(pixelMatch[1]) < 0 && pixels.length < 3) {
+pixels.push(pixelMatch[1]);
+}
+}
+
+for (var i = 0; i < anchors.length; i++) {
+var opening = (anchors[i].match(/^<a\b[^>]*>/i) || [])[0] || '';
+var href = decode(attr(opening, 'href'));
+var buttonText = text(anchors[i]);
+
+if (!href || !/download/i.test(buttonText)) continue;
+
+var server = serverNameFromLabel(buttonText);
+if (!server || seen[server]) continue;
+
+if (server === 'Pixel Server') continue;
+
+// T3 redirects straight to the file; the other servers hand out a
+// presigned Cloudflare R2 link on the button itself.
+if (/r2\.cloudflarestorage\.com/i.test(href) || /\/t3dl\.php/i.test(href)) {
+seen[server] = true;
+picked.push({ url: href, server: server });
+}
+}
+
+var streams = picked.map(function (entry) {
+return {
+url: entry.url,
+quality: label,
+source: labelWithSize(entry.server, size)
+};
+});
+
+for (var j = 0; j < pixels.length; j++) {
+try {
+var pixel = await resolvePixelDrain(pixels[j]);
+streams.push({
+url: pixel.url,
+quality: label,
+source: labelWithSize('Pixel Server', size || pixel.size)
+});
+} catch (error) {
+// A dead or non-video pixel mirror is simply left out.
+reportError('Pixel mirror skipped: ' + String(error));
+}
+}
+
+streams.sort(function (a, b) {
+return serverRank(a.source) - serverRank(b.source);
+});
+
 return streams;
 }
 
-var link = generateLink(html);
+async function resolveHubCloud(url, quality) {
+var html = await get(url);
 
-if (!link) {
-throw new Error('HubCloud generate link not found');
+// Already on the generated page: just read its server buttons.
+if (GENERATE_HOST.test(url)) {
+var direct = await serversFromGenerated(html, null, quality);
+
+if (!direct.length) {
+throw new Error('No download server on the generated page');
 }
 
+return direct;
+}
+
+var base = fileMeta(html, quality);
+var streams = [];
+var link = generateLink(html);
+
+if (link) {
+try {
 var generated = await get(link, {
 'User-Agent': 'Mozilla/5.0',
 'Referer': url
 });
 
-var direct = extractR2(generated);
-
-direct.forEach(function (value) {
-streams.push({ url: value, quality: label, source: 'HubCloud · R2' });
-});
-
-var pixelIds = extractPixelDrain(generated);
-
-for (var i = 0; i < pixelIds.length && streams.length < 3; i++) {
-try {
-var pixel = await resolvePixelDrain(pixelIds[i]);
-
-streams.push({
-url: pixel.url,
-quality: label,
-source: 'Pixel Server' + (pixel.size ? ' · ' + pixel.size : '')
-});
+streams = await serversFromGenerated(generated, base, quality);
 } catch (error) {
-reportError('PixelDrain mirror skipped: ' + String(error));
+reportError('Generated page failed: ' + String(error));
 }
+}
+
+// Fall back to whatever the drive page itself links to.
+if (!streams.length) {
+extractR2(html)
+.slice(0, 2)
+.forEach(function (value) {
+streams.push({
+url: value,
+quality: base.quality || quality || 'Auto',
+source: labelWithSize('HubCloud Server', base.size)
+});
+});
 }
 
 if (!streams.length) {
@@ -1978,25 +2102,33 @@ ordered = watchButtons.length
 
 var limited = ordered.slice(0, 6);
 
-for (var i = 0; i < limited.length; i++) {
-try {
-var streams = await resolveStreams(
-limited[i].url,
-limited[i].quality || quality,
-0
-);
-
-streams.forEach(function (stream) {
+// Every button is resolved at once: each quality file needs its own
+// hubdrive -> hubcloud -> generated page chain.
+var resolvedButtons = await Promise.all(
+limited.map(function (button) {
+return resolveStreams(button.url, button.quality || quality, 0).then(
+function (streams) {
+return (streams || []).map(function (stream) {
 if (!stream.quality || stream.quality === 'Auto') {
-stream.quality = limited[i].quality || quality || 'Auto';
+stream.quality = button.quality || quality || 'Auto';
 }
-collected = collected.concat(stream);
+
+return stream;
 });
-} catch (error) {
+},
+function (error) {
 failures++;
 reportError('Button resolve failed: ' + String(error));
+
+return [];
 }
-}
+);
+})
+);
+
+resolvedButtons.forEach(function (streams) {
+collected = collected.concat(streams);
+});
 
 if (!buttons.length) {
 // No HDHub4u host buttons at all: is it a download-only post?
@@ -2022,7 +2154,10 @@ seen[key] = true;
 return true;
 })
 .sort(function (a, b) {
-return qualityRank(b.quality) - qualityRank(a.quality);
+return (
+qualityRank(b.quality) - qualityRank(a.quality) ||
+serverRank(a.source) - serverRank(b.source)
+);
 })
 .map(function (stream) {
 return new StreamResult({
