@@ -82,10 +82,11 @@ try {
 var SHORT_TITLES = true; // false = keep the full scene-style titles
 
 // Which sources the stream list shows:
-//   'playdrive' = the PlayDrive player only (720P / 1080P / Auto)
-//   'hubdrive'  = the HubDrive file servers only (FSL / FSLv2 / Pixel / HubCloud)
+//   'hubdrive'  = HubDrive file servers only (default)
+//                 720P / 1080P / 2160P rows with their file size
+//   'playdrive' = the PlayDrive player only
 //   'all'       = both
-var STREAM_SOURCE = 'playdrive';
+var STREAM_SOURCE = 'hubdrive';
 
 // false = one "Auto" row per stream: SkyStream then reads the HLS
 //         master itself, so the player gets a Quality tab (Auto /
@@ -1091,6 +1092,15 @@ quality: event.quality || current || ''
 return out;
 }
 
+// A season archive is offered as "… PACK [33.7GB]" — far too big to be
+// one episode.
+function isSeasonArchive(label) {
+var value = String(label || '');
+
+return /\bpack\b/i.test(value) &&
+/\[\s*\d+(?:\.\d+)?\s*(?:GB|TB)\s*\]/i.test(value);
+}
+
 function uniqueBy(items, key) {
 var seen = {};
 
@@ -1478,39 +1488,70 @@ var key = tag.season + ':' + tag.episode;
 
 if (packIndex[key]) return;
 
-packIndex[key] = file.url;
+packIndex[key] = [file.url];
 });
 }
 }
 
-// Episodes found from the player get their file attached, so the
-// stream list shows HubCloud / FSL / FSLv2 / Pixel rows next to it.
+// No pack on the post: HUBLinks mirrors the show's episodes with their
+// HubDrive files (480P / 720P / 1080P), which is how shows that only
+// publish ad-gated links still get file streams.
+var hubIndex = {};
+
+if (STREAM_SOURCE !== 'playdrive' && !packs.length) {
+try {
+hubIndex = await hubEpisodeFiles(title, fallbackSeason, list.length || 100);
+} catch (error) {
+reportError('hblinks lookup failed: ' + String(error.message || error));
+}
+}
+
+var fileIndex = {};
+
+[packs.length ? packIndex : hubIndex, hubIndex].forEach(function (index) {
+Object.keys(index).forEach(function (key) {
+if (!fileIndex[key]) fileIndex[key] = index[key];
+});
+});
+
+// Episodes found from the player get their files attached, so the
+// stream list shows the HubDrive servers for each of them.
 if (list.length) {
 list.forEach(function (episode) {
-var file = packIndex[episode.season + ':' + episode.episode];
+var files = fileIndex[episode.season + ':' + episode.episode];
 
-if (!file) return;
+if (!files || !files.length) return;
 
-EPISODE_FILES[String(episode.url).split('#')[0]] = file;
+EPISODE_FILES[String(episode.url).split('#')[0]] = files;
 
 if (String(episode.url).indexOf('#h=') < 0) {
-episode.url = episode.url + '#h=' + encodeURIComponent(file);
+episode.url =
+episode.url +
+'#h=' +
+files
+.map(function (file) { return encodeURIComponent(file); })
+.join('|');
 }
 });
 }
 
-// No per-episode links at all: use the files inside the packs.
+// Episodes that only exist as files: build them from the index.
 if (!list.length) {
-Object.keys(packIndex).forEach(function (key) {
+Object.keys(fileIndex).forEach(function (key) {
 var numbers = key.split(':');
 
 if (seen[key]) return;
 
 seen[key] = true;
 
+var files = fileIndex[key];
+
+// The first file is the episode URL; the rest come from the cache.
+EPISODE_FILES[files[0]] = files;
+
 list.push(new Episode({
 name: 'Episode ' + numbers[1],
-url: packIndex[key],
+url: files[0],
 season: Number(numbers[0]),
 episode: Number(numbers[1])
 }));
@@ -1727,6 +1768,173 @@ return {
 url: 'https://pixeldrain.dev/api/file/' + id,
 size: formatSize(Number(info.size))
 };
+}
+
+// HUBLinks (hblinks.lol) mirrors every post as one archive entry that
+// carries the HubDrive file(s) for it. Its WordPress REST API is used to
+// find the entry for a title whose own post only links player/ad pages.
+var HUBLINKS_API =
+'https://hblinks.lol/wp-json/wp/v2/posts?per_page=100&search=';
+
+function searchName(title) {
+return String(title || '')
+.replace(/\((19|20)\d{2}\)/g, ' $1 ')
+.replace(/\[[^\]]*\]/g, ' ')
+.replace(/\bseason\s*\d{1,2}\b/gi, ' ')
+.replace(
+/\b(?:all\s+episodes|full\s+series|complete|hindi|english|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio)\b/gi,
+' '
+)
+.replace(/\b\d{3,4}p\b/gi, ' ')
+.replace(/\b(?:4k|2k|uhd|hd|hevc|x264|x265|10bit|aac|ddp\s*\d?(?:\.\d)?|atmos|esubs?)\b/gi, ' ')
+.replace(/[^A-Za-z0-9 ]+/g, ' ')
+.replace(/\s+/g, ' ')
+.trim();
+}
+
+function hubQueries(title, season) {
+var name = searchName(title);
+var words = name.split(' ').filter(Boolean);
+var list = [];
+
+if (season) {
+// HUBLinks posters write "S05-E02" more often than "S5", so the
+// padded form goes first; "S5" is also searched because it matches
+// a wider set of posts.
+list.push(name + ' S' + (season < 10 ? '0' + season : season));
+list.push(name + ' S' + season);
+list.push(words.slice(0, 3).join(' ') + ' S' + season);
+list.push(words.slice(0, 2).join(' ') + ' S' + season);
+list.push(name);
+} else {
+list.push(name);
+list.push(words.slice(0, 3).join(' '));
+}
+
+return list.filter(function (query, index) {
+return query && list.indexOf(query) === index;
+});
+}
+
+function hubFilesFromPost(post) {
+var html = String((post && post.content && post.content.rendered) || '');
+var files = [];
+var re = /https:\/\/hubdrive\.[a-z]+\/file\/[A-Za-z0-9]+/gi;
+var match;
+
+while ((match = re.exec(html)) !== null) {
+if (files.indexOf(match[0]) < 0) files.push(match[0]);
+}
+
+return {
+title: text((post && post.title && post.title.rendered) || ''),
+files: files
+};
+}
+
+// A request per query, merged, until `enough` entries are known.
+async function hubSearch(title, season, accept, enough) {
+var queries = hubQueries(title, season);
+var seen = {};
+var found = [];
+
+for (var i = 0; i < queries.length; i++) {
+var posts;
+
+try {
+var body = await fetchUrl(
+HUBLINKS_API + encodeURIComponent(queries[i]),
+{ 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+TIMEOUT.page
+);
+
+posts = JSON.parse(body);
+} catch (error) {
+log('hblinks: ' + queries[i] + ' failed – ' + String(error.message || error));
+continue;
+}
+
+if (!Array.isArray(posts)) continue;
+
+var wanted = [];
+
+posts.forEach(function (post) {
+var entry = hubFilesFromPost(post);
+
+if (!entry.files.length) return;
+if (!accept(entry.title, entry.files)) return;
+if (seen[entry.files[0]]) return;
+
+seen[entry.files[0]] = true;
+wanted.push(entry);
+});
+
+if (wanted.length) {
+found = found.concat(wanted);
+log('hblinks: "' + queries[i] + '" -> ' + found.length + ' entr(ies)');
+} else if (found.length) {
+// This query only repeated what is already known: nothing left to add.
+break;
+}
+
+if (enough && found.length >= Math.max(1, enough - 2)) break;
+}
+
+return found;
+}
+
+// "Show S05E02" -> { season: 5, episode: 2 } (also S05-E02, S5 Ep 2)
+function hubMatchesShow(title, showName) {
+var words = searchName(showName)
+.toLowerCase()
+.split(' ')
+.filter(function (word) { return word.length > 3; });
+
+if (!words.length) return true;
+
+var value = String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+
+return words.some(function (word) { return value.indexOf(word) >= 0; });
+}
+
+// Episodes of one season -> their HubDrive files.
+async function hubEpisodeFiles(title, season, expected) {
+var entries = await hubSearch(title, season, function (postTitle) {
+var tag = episodeTag(postTitle);
+
+return !!tag && tag.season === season && hubMatchesShow(postTitle, title);
+}, expected);
+
+var index = {};
+
+entries.forEach(function (entry) {
+var tag = episodeTag(entry.title);
+
+if (!tag) return;
+
+var key = tag.season + ':' + tag.episode;
+
+if (!index[key]) index[key] = entry.files;
+});
+
+return index;
+}
+
+// One movie -> every HubDrive file HUBLinks lists for it.
+async function hubMovieFiles(title) {
+var entries = await hubSearch(title, 0, function (postTitle) {
+return hubMatchesShow(postTitle, title);
+});
+
+var files = [];
+
+entries.forEach(function (entry) {
+entry.files.forEach(function (file) {
+if (files.indexOf(file) < 0) files.push(file);
+});
+});
+
+return files.slice(0, 4);
 }
 
 // A pack page lists one file per episode (plus often a whole-season
@@ -2500,14 +2708,16 @@ url = String(url || '').trim();
 // An episode link may carry the episode's own HubDrive file after a
 // "#h=" marker (added by seriesEpisodes): the player stream and the
 // file servers are then both offered.
-var extraUrl = '';
+var extraUrls = [];
 var hashAt = url.indexOf('#h=');
 
 if (hashAt >= 0) {
 try {
-extraUrl = decodeURIComponent(url.slice(hashAt + 3));
+extraUrls = decodeURIComponent(url.slice(hashAt + 3))
+.split('|')
+.filter(Boolean);
 } catch (error) {
-extraUrl = '';
+extraUrls = [];
 }
 
 url = url.slice(0, hashAt);
@@ -2532,17 +2742,26 @@ var quality = '';
 // file. Its chain runs at the same time as the player link, so the two
 // never wait for one another.
 if (STREAM_SOURCE === 'playdrive') {
-extraUrl = '';
-} else if (!extraUrl && EPISODE_FILES[url]) {
-extraUrl = EPISODE_FILES[url];
+extraUrls = [];
+} else if (!extraUrls.length && EPISODE_FILES[url]) {
+extraUrls = [].concat(EPISODE_FILES[url]);
 }
 
-var extraPending =
-extraUrl && extraUrl !== url && !BLOCKED_HOST.test(extraUrl)
-? resolveStreams(extraUrl, '', 0).then(null, function (error) {
+extraUrls = extraUrls.filter(function (extra) {
+return extra && extra !== url && !BLOCKED_HOST.test(extra);
+});
+
+var extraPending = extraUrls.length
+? Promise.all(
+extraUrls.map(function (extra) {
+return resolveStreams(extra, '', 0).then(null, function (error) {
 reportError('episode file failed: ' + String(error.message || error));
 
 return [];
+});
+})
+).then(function (lists) {
+return lists.reduce(function (all, list) { return all.concat(list); }, []);
 })
 : null;
 
@@ -2631,9 +2850,32 @@ var watchButtons = ordered.filter(function (button) {
 return PLAY_HOST.test(button.url);
 });
 
-ordered = watchButtons.length
-? watchButtons.slice(0, 1)
-: ordered.slice(0, 1);
+if (watchButtons.length) {
+ordered = watchButtons.slice(0, 1);
+} else {
+// "1080p WEB-DL PACK [33.7GB]" is a whole season, not one
+// playable: per-episode links win when the post has both.
+var perEpisode = ordered.filter(function (button) {
+return !isSeasonArchive(button.label);
+});
+
+ordered = (perEpisode.length ? perEpisode : ordered).slice(0, 1);
+}
+}
+
+// A movie post with no HubDrive link: HUBLinks lists its files.
+if (STREAM_SOURCE === 'hubdrive' && !buttons.length && kind(pageTitle, page) === 'movie') {
+try {
+var movieFiles = await hubMovieFiles(pageTitle);
+
+for (var mf = 0; mf < movieFiles.length; mf++) {
+collected = collected.concat(
+await resolveStreams(movieFiles[mf], qualityOf(html), 0)
+);
+}
+} catch (error) {
+reportError('hblinks movie lookup failed: ' + String(error.message || error));
+}
 }
 
 var limited = ordered.slice(0, 6);
@@ -2704,13 +2946,15 @@ serverRank(a.source) - serverRank(b.source)
 });
 
 if (STREAM_SOURCE === 'hubdrive') {
-// The player/HLS rows are dropped as soon as a file server answered,
-// and kept only when there is no file at all.
-var hubStreams = selected.filter(function (stream) {
+// Player links are never listed: only the HubDrive file servers are.
+selected = selected.filter(function (stream) {
 return isHubDriveSource(stream.source);
 });
 
-if (hubStreams.length) selected = hubStreams;
+// 480P is only kept when it is the single copy of the episode.
+if (selected.some(function (stream) { return qualityRank(stream.quality) > 480; })) {
+selected = selected.filter(function (stream) { return qualityRank(stream.quality) !== 480; });
+}
 } else if (STREAM_SOURCE === 'playdrive') {
 // HubDrive rows are removed, whatever produced them, and a PlayDrive
 // row wins over any other player on the same post.
@@ -2747,7 +2991,10 @@ if (!streams.length) {
 return callback({
 success: false,
 errorCode: 'UNKNOWN_ERROR',
-message: blocked
+message: STREAM_SOURCE === 'hubdrive'
+? 'This post has no HubDrive file link (only player links, which ' +
+  'are turned off). Open the post on the website instead.'
+: blocked
 ? 'This post only offers download links on ad-gated hosts ' +
   '(greenmotors / hdstream4u / hubstream), which cannot be ' +
   'opened in the app. Open the post on the website instead.'

@@ -2,7 +2,7 @@
   "packageName": "com.jnkyst.repo.hdhub4u",
   "name": "HDhub4u",
   "version": 1,
-  "baseUrl": "https://hdhub4u.kz/",
+  "baseUrl": "https://hdhub4u.hot/",
   "description": "Bollywood, Hollywood and Hindi Dubbed Movies & Web Series",
   "authors": [
     "Jnkyst"
@@ -14,3 +14,4 @@
     "Movie",  "TvSeries"
   ]
 }
+
