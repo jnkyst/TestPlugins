@@ -1979,11 +1979,11 @@ var HUBLINKS_API =
 
 function searchName(title) {
 return String(title || '')
-.replace(/\((19|20)\d{2}\)/g, ' $1 ')
+.replace(/\(((?:19|20)\d{2})\)/g, ' $1 ')
 .replace(/\[[^\]]*\]/g, ' ')
 .replace(/\bseason\s*\d{1,2}\b/gi, ' ')
 .replace(
-/\b(?:all\s+episodes|full\s+series|complete|hindi|english|tamil|telugu|malayalam|kannada|punjabi|dubbed|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio|dual|multi|audio|audios|added|add|eps?|packs?|zipped?)\b/gi,
+/\b(?:all\s+episodes|full\s+series|full\s+movie|full\s+hd|complete|hindi|english|tamil|telugu|malayalam|kannada|punjabi|dubbed|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio|dual|multi|audio|audios|added|add|eps?|packs?|zipped?)\b/gi,
 ' '
 )
 // OTT tags tacked onto post titles ("… | PrimeVideo Series [EP – 1 Added]").
@@ -2023,7 +2023,12 @@ var pad = season < 10 ? '0' + season : String(season);
 short1 + ' S' + pad, name + ' S' + season, short3 + ' S' + season,
 name, short1].forEach(function (query) { list.push(query); });
 } else {
+var noYear = words
+.filter(function (word) { return !/^(?:19|20)\d{2}$/.test(word); })
+.join(' ');
+
 list.push(name);
+list.push(noYear);
 list.push(words.slice(0, 3).join(' '));
 }
 
@@ -2116,7 +2121,10 @@ var words = searchName(showName)
 .toLowerCase()
 .split(' ')
 .filter(function (word) {
-return word.length > 2 && !/^(?:the|and|of|for|with|from)$/.test(word);
+// A year is a hint, not a requirement: HUBLinks titles often omit it.
+return word.length > 1 &&
+!/^(?:the|and|of|for|with|from)$/.test(word) &&
+!/^(?:19|20)\d{2}$/.test(word);
 });
 
 if (!words.length) return true;
@@ -2128,7 +2136,13 @@ String(title || '')
 .replace(/\s+/g, ' ') +
 ' ';
 
-return words.every(function (word) { return value.indexOf(' ' + word) >= 0; });
+var matched = words.filter(function (word) {
+return value.indexOf(' ' + word) >= 0;
+}).length;
+
+// One leftover word ("… | Full Movie") may be missing from a HUBLinks
+// title, but the rest of the name must be there.
+return matched >= words.length - (words.length >= 3 ? 1 : 0);
 }
 
 // Episodes of one season -> their HubDrive files.
@@ -3113,16 +3127,33 @@ ordered = (perEpisode.length ? perEpisode : ordered).slice(0, 3);
 }
 }
 
-// A movie post with no HubDrive link: HUBLinks lists its files.
-if (STREAM_SOURCE === 'hubdrive' && !buttons.length && kind(pageTitle, page) === 'movie') {
+// A movie: HUBLinks usually lists every quality, while the post often
+// links only one of them. Both sets are used, minus duplicates.
+if (STREAM_SOURCE === 'hubdrive' && kind(pageTitle, page) === 'movie') {
 try {
 var movieFiles = await hubMovieFiles(pageTitle);
+var postedFiles = {};
 
-for (var mf = 0; mf < movieFiles.length; mf++) {
-collected = collected.concat(
-await resolveStreams(movieFiles[mf], qualityOf(html), 0)
+buttons.forEach(function (button) { postedFiles[button.url] = true; });
+
+movieFiles = movieFiles.filter(function (file) {
+return !postedFiles[file];
+});
+
+// Every quality file resolves at once: they are independent chains.
+var movieStreams = await Promise.all(
+movieFiles.map(function (file) {
+return resolveStreams(file, qualityOf(html), 0).then(null, function (error) {
+reportError('movie file failed: ' + String(error.message || error));
+
+return [];
+});
+})
 );
-}
+
+collected = collected.concat(
+movieStreams.reduce(function (all, list) { return all.concat(list); }, [])
+);
 } catch (error) {
 reportError('hblinks movie lookup failed: ' + String(error.message || error));
 }
