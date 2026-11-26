@@ -2197,36 +2197,72 @@ if (label) seen[String(label).toLowerCase()] = true;
 return Object.keys(seen).length;
 }
 
+// The words that identify a title: no quality tags (searchName strips
+// those), no episode numbers, no site names, no years.
+var NAME_JUNK = new RegExp('^(?:hdhub4u[a-z]*|hdhub|www|com|in|net|org|ms|ws|tv|mz|mu|pk|' +
+'mn|cc|dev|dl|download|online|site|app|film|films|' +
+'hq|hd|uhd|4k|8k|hevc|h265|x265|h264|x264|web|webrip|webdl|hdrip|' +
+'bluray|bdrip|brrip|dvdrip|hdtc|hdcam|predvd|ds4k|amzn|nf)$');
+
+function nameWords(value) {
+return searchName(String(value || ''))
+.toLowerCase()
+.replace(/\bs\s*\d{1,2}\s*[-._ ]?\s*e\s*\d{1,3}\b/gi, ' ')
+.replace(/\bs\s*\d{1,2}\s*ep?\s*\d{1,3}\b/gi, ' ')
+.replace(/\bs\s*\d{1,2}\b/gi, ' ')
+.replace(/[^a-z0-9]+/g, ' ')
+.split(' ')
+.filter(function (word, at, all) {
+return !!word && all.indexOf(word) === at;
+})
+.map(function (word) { return word; })
+.filter(function (word) { return word.length > 1; })
+.filter(function (word) {
+return !/^(?:the|and|of|for|with|from|to|a|an)$/.test(word) &&
+!/^(?:19|20)\d{2}$/.test(word) &&
+!NAME_JUNK.test(word);
+});
+}
+
 // "Show S05E02" -> { season: 5, episode: 2 } (also S05-E02, S5 Ep 2)
 // Every meaningful word of the show has to appear in the HUBLinks post
-// title: "The Good Doctor" must not accept "The Good Place".
+// title ("The Good Doctor" must not accept "The Good Place"), and the
+// HUBLinks title must not name anything else either: "Stolen Girl
+// (2025)" is not "Stolen (2025)".
 function hubMatchesShow(title, showName) {
-var words = searchName(showName)
-.toLowerCase()
-.split(' ')
-.filter(function (word) {
-// A year is a hint, not a requirement: HUBLinks titles often omit it.
-return word.length > 1 &&
-!/^(?:the|and|of|for|with|from)$/.test(word) &&
-!/^(?:19|20)\d{2}$/.test(word);
-});
+var words = nameWords(showName);
 
 if (!words.length) return true;
 
-var value = ' ' +
-String(title || '')
+var value = ' ' + searchName(title)
 .toLowerCase()
 .replace(/[^a-z0-9]+/g, ' ')
-.replace(/\s+/g, ' ') +
-' ';
-
+.replace(/\s+/g, ' ') + ' ';
 var matched = words.filter(function (word) {
 return value.indexOf(' ' + word) >= 0;
 }).length;
 
 // One leftover word ("… | Full Movie") may be missing from a HUBLinks
 // title, but the rest of the name must be there.
-return matched >= words.length - (words.length >= 3 ? 1 : 0);
+if (matched < words.length - (words.length >= 3 ? 1 : 0)) return false;
+
+// The other direction: a title that adds a word of its own is usually
+// a different film, unless it is an episode entry (those carry the
+// episode name as well).
+var extras = nameWords(title).filter(function (word) {
+return words.indexOf(word) < 0;
+});
+var allowed = episodeTag(title) ? 3 : words.length >= 2 ? 1 : 0;
+
+if (extras.length > allowed) return false;
+
+// Two different years are two different films.
+var showYear = (String(showName || '').match(/\b(?:19|20)\d{2}\b/) || [])[0];
+var titleYear = (String(title || '').match(/\b(?:19|20)\d{2}\b/) || [])[0];
+
+if (showYear && titleYear && showYear !== titleYear) return false;
+
+return true;
 }
 
 // The HUBLinks search answers in seconds, so it is started from the
