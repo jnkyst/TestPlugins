@@ -395,6 +395,39 @@ return !/^(category|page|wp-|search|author|tag|date|feed|comments|privacy|terms|
 
 var responseCache = {};
 
+// Resolution of one HubDrive file costs three pages plus a check, so a
+// freshly resolved file is remembered for a few minutes: re-opening an
+// episode is then instant. The window is short because a host can run
+// out of quota.
+var streamCache = {};
+var STREAM_CACHE_MS = 4 * 60 * 1000;
+
+// The HUBLinks search is by far the slowest request of the whole
+// lookup (2-3 s on their side), so its answers are remembered too.
+var hubSearchCache = {};
+var HUB_SEARCH_CACHE_MS = 10 * 60 * 1000;
+
+function copyRows(rows) {
+return (rows || []).map(function (row) {
+return {
+url: row.url,
+quality: row.quality,
+source: row.source,
+headers: row.headers,
+subtitles: row.subtitles
+};
+});
+}
+
+// Keep a cache from growing without bound in a long session.
+function pruneCache(cache, limit) {
+var keys = Object.keys(cache);
+
+while (keys.length > limit) {
+delete cache[keys.shift()];
+}
+}
+
 async function fetchUrl(url, headers, timeoutMs) {
 var response = await withTimeout(
 http_get(url, headers || {
@@ -2053,64 +2086,115 @@ files: files
 };
 }
 
-// A request per query, merged, until `enough` entries are known.
-async function hubSearch(title, season, accept, enough) {
-var queries = hubQueries(title, season);
-var seen = {};
-var found = [];
+// One HUBLinks query -> its entries ({ title, files }). Slow on their
+// side, so the answer is cached; a failure is an empty list.
+async function hubPosts(query) {
+var hit = hubSearchCache[query];
 
-for (var i = 0; i < queries.length; i++) {
-var posts;
+if (hit && Date.now() - hit.at < HUB_SEARCH_CACHE_MS) return hit.entries;
+
+var entries = [];
 
 try {
 var body = await fetchUrl(
-HUBLINKS_API + encodeURIComponent(queries[i]),
+HUBLINKS_API + encodeURIComponent(query),
 { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
 TIMEOUT.page
 );
+var posts = JSON.parse(body);
 
-posts = JSON.parse(body);
+if (Array.isArray(posts)) {
+// Entries without a HubDrive file are kept: their titles are what
+// tells that a show only exists as a season pack.
+entries = posts.map(hubFilesFromPost);
+
+hubSearchCache[query] = { at: Date.now(), entries: entries };
+pruneCache(hubSearchCache, 40);
+}
 } catch (error) {
-log('hblinks: ' + queries[i] + ' failed – ' + String(error.message || error));
-continue;
+log('hblinks: ' + query + ' failed – ' + String(error.message || error));
 }
 
-if (!Array.isArray(posts)) continue;
+return entries;
+}
 
-var wanted = [];
+// Queries are asked for in small parallel rounds instead of one after
+// another: each answer takes seconds on their side, so two at a time
+// costs the same as one and covers both spellings of the name.
+async function hubSearch(title, season, accept, enough) {
+var queries = hubQueries(title, season);
+var widths = [2, 4, 4];
+var seen = {};
+var found = [];
+var at = 0;
+var round = 0;
 
-posts.forEach(function (post) {
-var entry = hubFilesFromPost(post);
+function add(entries) {
+var added = 0;
 
+entries.forEach(function (entry) {
 if (!entry.files.length) return;
 if (!accept(entry.title, entry.files)) return;
 if (seen[entry.files[0]]) return;
 
 seen[entry.files[0]] = true;
-wanted.push(entry);
+found.push(entry);
+added++;
 });
 
-if (wanted.length) {
-found = found.concat(wanted);
-log('hblinks: "' + queries[i] + '" -> ' + found.length + ' entr(ies)');
-} else if (found.length) {
-// This query only repeated what is already known: nothing left to add.
-break;
-} else if (posts.some(function (post) {
-// The show is on HUBLinks but only as season packs: no episode
-// posts exist, so no further query can find one.
-var name = hubFilesFromPost(post).title;
+return added;
+}
 
-return !!name && hubMatchesShow(name, title) && !episodeTag(name);
-})) {
-log('hblinks: "' + queries[i] + '" -> season packs only');
+while (at < queries.length && round < widths.length) {
+var batch = queries.slice(at, at + widths[round]);
+at += batch.length;
+round++;
+
+var lists = await Promise.all(batch.map(function (query) {
+return hubPosts(query);
+}));
+var added = 0;
+
+lists.forEach(function (list) { added += add(list); });
+
+if (added) {
+// The first query to find the show usually finds all of it.
+log('hblinks: "' + batch[0] + '" -> ' + found.length + ' entr(ies)');
+}
+
+if (found.length && (enough ? found.length >= Math.max(1, enough - 2) : distinctQuality(found) >= 3)) {
 break;
 }
 
-if (enough && found.length >= Math.max(1, enough - 2)) break;
+if (found.length && !added) break;
+
+// The show is on HUBLinks but only as season packs: no episode posts
+// exist, so no further query can find one.
+if (!found.length && season && lists.some(function (list) {
+return list.some(function (entry) {
+return entry.title && hubMatchesShow(entry.title, title) && !episodeTag(entry.title);
+});
+})) {
+log('hblinks: "' + batch[0] + '" -> season packs only');
+break;
+}
 }
 
 return found;
+}
+
+// How many different resolutions the entry titles name (480p, 720p,
+// 1080p, 2160p): a movie is done once three of them are known.
+function distinctQuality(entries) {
+var seen = {};
+
+entries.forEach(function (entry) {
+var label = qualityOf(entry.title);
+
+if (label) seen[String(label).toLowerCase()] = true;
+});
+
+return Object.keys(seen).length;
 }
 
 // "Show S05E02" -> { season: 5, episode: 2 } (also S05-E02, S5 Ep 2)
@@ -2145,20 +2229,109 @@ return value.indexOf(' ' + word) >= 0;
 return matched >= words.length - (words.length >= 3 ? 1 : 0);
 }
 
+// The HUBLinks search answers in seconds, so it is started from the
+// url slug while the origin and the post page are still loading. Its
+// answer is used only if the slug name and the real title agree.
+function slugGuess(url) {
+var path = '';
+
+try {
+path = new URL(String(url)).pathname;
+} catch (error) {
+path = String(url || '');
+}
+
+var slug = (String(path).split('?')[0].match(/([^\/]+)\/?$/) || [])[1] || '';
+
+if (!slug || /^\d+$/.test(slug)) return null;
+
+var words = slug.replace(/[-_]+/g, ' ').replace(/\.(?:html?|php)$/i, '');
+var season = (words.match(/\bseason\s*(\d{1,2})\b/i) || [])[1] ||
+(words.match(/\bs(\d{1,2})\b/i) || [])[1];
+var name = searchName(words);
+
+if (!name || name.split(' ').length < 1) return null;
+
+return { name: name, season: season ? Number(season) : 0 };
+}
+
+function startHubPrefetch(url) {
+try {
+if (STREAM_SOURCE !== 'hubdrive' || !isSiteUrl(url)) return null;
+
+var guess = slugGuess(url);
+
+if (!guess || !guess.name) return null;
+
+var promise = hubSearch(
+guess.name,
+guess.season,
+function (postTitle) { return hubMatchesShow(postTitle, guess.name); },
+guess.season ? 1 : 0
+).then(function (entries) {
+return { name: guess.name, season: guess.season, entries: entries };
+}, function () {
+return null;
+});
+
+// A prefetch must never be the reason a lookup fails.
+promise.then(null, function () {});
+
+return promise;
+} catch (error) {
+return null;
+}
+}
+
+// Entries of a running prefetch, when they belong to this title.
+async function prefetchEntries(prefetch, title, season, accept) {
+if (!prefetch) return null;
+
+var guess;
+
+try {
+guess = await prefetch;
+} catch (error) {
+return null;
+}
+
+if (!guess || !guess.entries || !guess.entries.length) return null;
+if (!hubMatchesShow(title, guess.name)) return null;
+
+var list = guess.entries.filter(function (entry) {
+if (season) {
+var tag = episodeTag(entry.title);
+
+if (!tag || tag.season !== season) return false;
+}
+
+return accept(entry.title, entry.files);
+});
+
+if (list.length) {
+log('hblinks: slug prefetch used ("' + guess.name + '")');
+}
+
+return list.length ? list : null;
+}
+
 // Episodes of one season -> their HubDrive files.
-async function hubEpisodeFiles(title, season, expected) {
-var entries = await hubSearch(title, season, function (postTitle) {
+async function hubEpisodeFiles(title, season, expected, prefetch) {
+var accept = function (postTitle) {
 var tag = episodeTag(postTitle);
 
 return !!tag && tag.season === season && hubMatchesShow(postTitle, title);
-}, expected);
+};
+var entries = await prefetchEntries(prefetch, title, season, accept);
+
+if (!entries) entries = await hubSearch(title, season, accept, expected);
 
 var index = {};
 
 entries.forEach(function (entry) {
 var tag = episodeTag(entry.title);
 
-if (!tag) return;
+if (!tag || !entry.files.length) return;
 
 var key = tag.season + ':' + tag.episode;
 
@@ -2169,10 +2342,13 @@ return index;
 }
 
 // One movie -> every HubDrive file HUBLinks lists for it.
-async function hubMovieFiles(title) {
-var entries = await hubSearch(title, 0, function (postTitle) {
+async function hubMovieFiles(title, prefetch) {
+var accept = function (postTitle) {
 return hubMatchesShow(postTitle, title);
-});
+};
+var entries = await prefetchEntries(prefetch, title, 0, accept);
+
+if (!entries) entries = await hubSearch(title, 0, accept);
 
 var files = [];
 
@@ -2459,21 +2635,35 @@ var pixels = [];
 var pixelRe = /pixeldrain\.(?:dev|com)\/u\/([A-Za-z0-9]+)/gi;
 var pixelMatch;
 
-// The button's own href is a shared placeholder ("negn6f"), so ids that
-// a script assigns to the button are the real ones and go first.
-var scriptPixels = String(html || '').match(
-/\.href\s*=\s*["']https?:\/\/pixeldrain\.(?:dev|com)\/u\/[A-Za-z0-9]+/gi
-) || [];
+// The button's own href is a shared placeholder ("negn6f"); the real
+// per-file id is written into the page by a script ("var pxl = ..."),
+// so ids found inside script blocks are the ones worth checking.
+var scripts = String(html || '').match(/<script\b[^>]*>[\s\S]*?<\/script>/gi) || [];
+var scriptPixels = [];
 
-scriptPixels.forEach(function (value) {
+scripts.forEach(function (block) {
+var ids = block.match(/pixeldrain\.(?:dev|com)\/u\/[A-Za-z0-9]+/gi) || [];
+
+ids.forEach(function (value) {
 var id = (value.match(/\/u\/([A-Za-z0-9]+)/i) || [])[1];
 
-if (id && pixels.indexOf(id) < 0 && pixels.length < 4) pixels.push(id);
+if (id && scriptPixels.indexOf(id) < 0 && scriptPixels.length < 4) {
+scriptPixels.push(id);
+}
+});
 });
 
+scriptPixels.forEach(function (id) {
+if (pixels.indexOf(id) < 0) pixels.push(id);
+});
+
+// Only when no script swaps an id in is the anchor's own href a real
+// file; otherwise it is the placeholder every file shares.
+if (!pixels.length) {
 while ((pixelMatch = pixelRe.exec(String(html || ''))) !== null) {
 if (pixels.indexOf(pixelMatch[1]) < 0 && pixels.length < 4) {
 pixels.push(pixelMatch[1]);
+}
 }
 }
 
@@ -2963,16 +3153,24 @@ chosen = files.slice(0, 1);
 }
 }
 
-var streams = [];
-
-for (var i = 0; i < chosen.length; i++) {
-try {
-var rows = await resolveStreams(
-chosen[i].url,
-qualityOf(chosen[i].name) || quality,
+// Every chosen file is an independent chain: resolve them together.
+var lists = await Promise.all(
+chosen.map(function (file) {
+return resolveStreams(
+file.url,
+qualityOf(file.name) || quality,
 depth + 1
+).then(null, function (error) {
+reportError('pack file failed: ' + String(error.message || error));
+
+return [];
+});
+})
 );
 
+var streams = [];
+
+lists.forEach(function (rows, i) {
 // Several files at once need to say which one they are.
 if (chosen.length > 1) {
 var tag = episodeTag(chosen[i].name);
@@ -2987,10 +3185,7 @@ if (suffix) row.source = row.source + suffix;
 }
 
 streams = streams.concat(rows);
-} catch (error) {
-reportError('pack file failed: ' + String(error.message || error));
-}
-}
+});
 
 if (!streams.length) {
 throw new Error('HubDrive pack has no playable file');
@@ -3000,8 +3195,33 @@ return streams;
 }
 
 // Resolve any URL this plugin understands into playable streams.
+// HubDrive files and packs are cached: the whole chain behind them is
+// three page loads, and the same file is asked for again and again.
 async function resolveStreams(url, quality, depth) {
 if (depth > 4) return [];
+
+var cacheable = /^https?:\/\/(?:www\.)?hubdrive\.[a-z]+\//i.test(String(url));
+var cacheKey = String(url) + '|' + String(quality || '');
+
+if (cacheable) {
+var cached = streamCache[cacheKey];
+
+if (cached && Date.now() - cached.at < STREAM_CACHE_MS) return copyRows(cached.rows);
+}
+
+var fresh = await resolveStreamsChain(url, quality, depth);
+
+if (cacheable) {
+if (fresh && fresh.length) {
+streamCache[cacheKey] = { at: Date.now(), rows: copyRows(fresh) };
+pruneCache(streamCache, 40);
+}
+}
+
+return fresh;
+}
+
+async function resolveStreamsChain(url, quality, depth) {
 
 if (STREAM_HOST.test(url)) {
 return resolveHdStream(url);
@@ -3105,8 +3325,6 @@ fail(callback, error);
 
 async function loadStreams(url, callback) {
 try {
-await ensureOrigin(false);
-
 url = String(url || '').trim();
 
 // An episode link may carry the episode's own HubDrive file after a
@@ -3126,6 +3344,12 @@ extraUrls = [];
 
 url = url.slice(0, hashAt);
 }
+
+// The HUBLinks lookup runs while the mirror and the post page load:
+// it takes seconds and does not need either of them.
+var hubPrefetch = startHubPrefetch(url);
+
+await ensureOrigin(false);
 
 // Already a playable file.
 if (/^https?:\/\/[^\s]+\.(?:mp4|m3u8|mkv)(?:[?#].*)?$/i.test(url) ||
@@ -3287,7 +3511,7 @@ ordered = (perEpisode.length ? perEpisode : ordered).slice(0, 3);
 // links only one of them. Both sets are used, minus duplicates.
 if (STREAM_SOURCE === 'hubdrive' && kind(pageTitle, page) === 'movie') {
 try {
-var movieFiles = await hubMovieFiles(pageTitle);
+var movieFiles = await hubMovieFiles(pageTitle, hubPrefetch);
 var postedFiles = {};
 
 buttons.forEach(function (button) { postedFiles[button.url] = true; });
@@ -3337,7 +3561,7 @@ html
 // 2. HUBLinks: one post per episode, each with that episode's
 //    HubDrive files.
 if (!seriesFirst.length) {
-var hubFirst = await hubEpisodeFiles(pageTitle, seriesSeason, 1);
+var hubFirst = await hubEpisodeFiles(pageTitle, seriesSeason, 1, hubPrefetch);
 var hubKeys = Object.keys(hubFirst).sort(byEpisodeKey);
 
 seriesFirst = await resolveFirstEpisode(
