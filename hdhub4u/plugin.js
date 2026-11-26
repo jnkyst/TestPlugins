@@ -79,7 +79,7 @@ try {
 // HOME SCREEN LAYOUT  <-- edit me
 // =====================================
 
-var SHORT_TITLES = true; // false = keep the full scene-style titles
+var SHORT_TITLES = false; // false = keep the full scene-style titles
 
 // Which sources the stream list shows:
 //   'hubdrive'  = HubDrive file servers only (default)
@@ -327,10 +327,32 @@ return siteOrigin || base();
 }
 
 // Any HDHub4u mirror, including the baseUrl host itself.
+// The HDHub4u brand, and whatever host the manifest (baseUrl) or the
+// mirror service points at right now: the site moves without warning,
+// so no single domain may be baked in.
 function isSiteUrl(url) {
 var host = originHost(url);
+
 if (!host) return false;
-return /(^|\.)hdhub4u\.[a-z.]+$/i.test(host);
+
+return /(^|\.)hdhub4u\.[a-z.]+$/i.test(host) || sameSite(host, knownHosts());
+}
+
+function knownHosts() {
+return [originHost(base()), siteOrigin ? originHost(siteOrigin) : ''];
+}
+
+function sameSite(host, hosts) {
+for (var i = 0; i < hosts.length; i++) {
+var known = hosts[i];
+
+if (!known) continue;
+if (host === known) return true;
+if (host.slice(-known.length - 1) === '.' + known) return true;
+if (known.slice(-host.length - 1) === '.' + host) return true;
+}
+
+return false;
 }
 
 function sitePath(url) {
@@ -406,7 +428,25 @@ if (hit && Date.now() - hit.at < 60000) {
 return hit.body;
 }
 
-var body = await fetchUrl(url, headers, TIMEOUT.page);
+var body;
+
+try {
+body = await fetchUrl(url, headers, TIMEOUT.page);
+} catch (error) {
+// The site can move in the middle of a session: resolve the origin
+// again and retry once on the live host. A 4xx is a real answer, so
+// only dead hosts and timeouts are retried.
+var message = String((error && error.message) || error);
+
+if (!isSiteUrl(url) || /HTTP 4\d\d/.test(message)) throw error;
+
+await ensureOrigin(true);
+
+var moved = origin() + sitePath(url);
+
+body = await fetchUrl(moved, headers, TIMEOUT.page);
+key = moved;
+}
 
 responseCache[key] = { body: body, at: Date.now() };
 
@@ -424,16 +464,31 @@ return /class=["'][^"']*\brecent-movies\b/i.test(String(html || '')) ||
 // Ask HDHub4u's mirror service which host is live right now. All
 // endpoints are asked at once and the first usable answer wins, so a
 // slow one neither delays the screen nor holds the call open.
-function askMirror(endpoint, stamp) {
-return fetchUrl(
+async function askMirror(endpoint, stamp) {
+var body;
+
+try {
+body = await fetchUrl(
 endpoint + '?v=' + stamp,
 { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
 TIMEOUT.mirror
-).then(function (body) {
-var data = JSON.parse(body);
+);
+} catch (error) {
+log('mirror endpoint failed: ' + endpoint + ' – ' + String(error.message || error));
+
+return '';
+}
+
+var data = {};
+
+try {
+data = JSON.parse(body) || {};
+} catch (error) {
+return '';
+}
 
 // `c` is the full site URL, `h` only the host.
-var candidates = [data && data.c, data && data.h];
+var candidates = [data.c, data.h];
 
 for (var i = 0; i < candidates.length; i++) {
 if (!candidates[i]) continue;
@@ -444,16 +499,21 @@ if (!decoded) continue;
 var url = /^https?:\/\//i.test(decoded) ? decoded : 'https://' + decoded;
 var host = originHost(url);
 
-if (host && /hdhub4u\./i.test(host)) {
-return 'https://' + host;
+if (!host) continue;
+if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host)) continue;
+if (isSiteUrl('https://' + host + '/')) return 'https://' + host;
+
+// A brand new domain: trust it only if it really serves HDHub4u.
+try {
+var home = await fetchUrl('https://' + host + '/', null, TIMEOUT.mirror);
+
+if (looksLikeListing(home)) return 'https://' + host;
+} catch (error) {
+// not this one
 }
 }
 
 return '';
-}, function (error) {
-log('mirror endpoint failed: ' + endpoint + ' – ' + String(error.message || error));
-return '';
-});
 }
 
 function resolveFromMirrorService() {
