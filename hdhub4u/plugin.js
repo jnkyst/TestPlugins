@@ -1023,7 +1023,8 @@ var DRIVE_HOST = /^https?:\/\/(?:www\.)?hubcloud\.[a-z]+\/drive\//i;
 var GENERATE_HOST = /^https?:\/\/gamerxyt\.com\/hubcloud\.php\?/i;
 
 // Download-only hosts this version recognises but cannot resolve.
-var BLOCKED_HOST = /^https?:\/\/(?:www\.)?(?:greenmotors\.[a-z]+|hubstream\.[a-z]+|vidaraa\.[a-z]+)\//i;
+var BLOCKED_HOST =
+/^https?:\/\/(?:www\.)?(?:greenmotors\.[a-z]+|hubstream\.[a-z]+|hdstream4u\.[a-z]+|vidaraa\.[a-z]+)\//i;
 
 function pageUrl(raw, page) {
 raw = decode(raw || '').trim();
@@ -1094,6 +1095,17 @@ return out;
 
 // A season archive is offered as "… PACK [33.7GB]" — far too big to be
 // one episode.
+// "FSL Server · 1080P · 932.36 MB · S01E01" -> { season: 1, episode: 1 }
+function streamEpisodeTag(stream) {
+var label = String((stream && stream.source) || '').match(
+/S(\d{1,2})\s*[-.]?\s*E(\d{1,3})/i
+);
+
+if (!label) return null;
+
+return { season: Number(label[1]), episode: Number(label[2]) };
+}
+
 function isSeasonArchive(label) {
 var value = String(label || '');
 
@@ -1519,10 +1531,19 @@ if (!fileIndex[key]) fileIndex[key] = index[key];
 if (list.length) {
 list.forEach(function (episode) {
 var files = fileIndex[episode.season + ':' + episode.episode];
+var link = String(episode.url || '').split('#')[0];
 
 if (!files || !files.length) return;
 
-EPISODE_FILES[String(episode.url).split('#')[0]] = files;
+// An ad-gated watch link (greenmotors / hubstream / hdstream4u) is
+// never a stream here: the episode opens on its HubDrive file.
+if (BLOCKED_HOST.test(link)) {
+episode.url = files[0];
+EPISODE_FILES[files[0]] = files;
+return;
+}
+
+EPISODE_FILES[link] = files;
 
 if (String(episode.url).indexOf('#h=') < 0) {
 episode.url =
@@ -1535,8 +1556,9 @@ files
 });
 }
 
-// Episodes that only exist as files: build them from the index.
-if (!list.length) {
+// Episodes that only exist as HubDrive files: the older episodes of a
+// post that links them through ad-gated hosts, or a show the player
+// does not list at all. They are added to the list, not swapped in.
 Object.keys(fileIndex).forEach(function (key) {
 var numbers = key.split(':');
 
@@ -1556,7 +1578,6 @@ season: Number(numbers[0]),
 episode: Number(numbers[1])
 }));
 });
-}
 
 // Packs with no per-episode files: one row per pack.
 if (!list.length) {
@@ -2745,6 +2766,7 @@ data: [new StreamResult({ url: url, source: 'Direct', quality: 'Auto' })]
 }
 
 var collected = [];
+var seriesFirst = [];
 var blocked = 0;
 var failures = 0;
 var quality = '';
@@ -2814,6 +2836,11 @@ function (button) { return button.url; }
 );
 
 if (STREAM_SOURCE === 'hubdrive') {
+// Ad-gated hosts are never opened, so they are not even resolved.
+buttons = buttons.filter(function (button) {
+return !BLOCKED_HOST.test(button.url);
+});
+
 // File links beat watch links: with them the list is HubDrive only.
 var fileButtons = buttons.filter(function (button) {
 return FILE_HOST.test(button.url);
@@ -2889,7 +2916,61 @@ reportError('hblinks movie lookup failed: ' + String(error.message || error));
 }
 }
 
-var limited = ordered.slice(0, 6);
+// A series post is an episode list, not one playable: whatever its
+// buttons hold (a whole-season pack, an episode pack, ad-gated watch
+// links), it opens on its first episode. HUBLinks carries that
+// episode's own HubDrive files, so they are fetched first and the
+// post's own buttons are then left alone.
+seriesFirst = [];
+
+if (STREAM_SOURCE === 'hubdrive' && kind(pageTitle, page) === 'series') {
+try {
+var hubFirst = await hubEpisodeFiles(pageTitle, seasonOf(pageTitle, html), 1);
+
+var hubKeys = Object.keys(hubFirst).sort(function (a, b) {
+var an = a.split(':').map(Number);
+var bn = b.split(':').map(Number);
+
+return an[0] - bn[0] || an[1] - bn[1];
+});
+
+var firstFiles = hubKeys.length ? hubFirst[hubKeys[0]].slice(0, 4) : [];
+
+log('hblinks: series post -> episode ' +
+(hubKeys.length ? hubKeys[0].split(':')[1] : '?') +
+' with ' + firstFiles.length + ' file(s)');
+
+seriesFirst = (
+await Promise.all(
+firstFiles.map(function (file) {
+return resolveStreams(file, qualityOf(html), 0).then(null, function (error) {
+reportError('hblinks episode file failed: ' + String(error.message || error));
+
+return [];
+});
+})
+)
+).reduce(function (all, list) { return all.concat(list); }, []);
+
+// A season-pack entry lists several episodes: only the first one's
+// rows belong to this answer.
+var firstTag = hubKeys.length ? hubKeys[0].split(':').map(Number) : null;
+
+if (firstTag) {
+seriesFirst = seriesFirst.filter(function (stream) {
+var label = String(stream.source || '').match(/S(\d{1,2})E(\d{1,3})/i);
+
+if (!label) return true;
+
+return Number(label[1]) === firstTag[0] && Number(label[2]) === firstTag[1];
+});
+}
+} catch (error) {
+reportError('hblinks series lookup failed: ' + String(error.message || error));
+}
+}
+
+var limited = seriesFirst.length ? [] : ordered.slice(0, 6);
 
 // Every button is resolved at once: each quality file needs its own
 // hubdrive -> hubcloud -> generated page chain.
@@ -2931,6 +3012,37 @@ blocked++;
 
 if (extraPending) {
 collected = collected.concat(await extraPending);
+}
+
+// The first episode's files are the whole answer for a series post.
+if (seriesFirst.length) collected = collected.concat(seriesFirst);
+
+// A pack page resolved through a button can still hand back several
+// episodes: only the earliest one belongs to this answer.
+if (STREAM_SOURCE === 'hubdrive' && kind(pageTitle, page) === 'series') {
+var earliestTag = null;
+
+collected.forEach(function (stream) {
+var tag = streamEpisodeTag(stream);
+
+if (!tag) return;
+if (
+!earliestTag ||
+tag.season < earliestTag.season ||
+(tag.season === earliestTag.season && tag.episode < earliestTag.episode)
+) {
+earliestTag = tag;
+}
+});
+
+if (earliestTag) {
+collected = collected.filter(function (stream) {
+var tag = streamEpisodeTag(stream);
+
+return !tag ||
+(tag.season === earliestTag.season && tag.episode === earliestTag.episode);
+});
+}
 }
 
 var seen = {};
