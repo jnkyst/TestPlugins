@@ -2294,6 +2294,12 @@ return match ? decode(match[0]) : '';
 // so every server can be offered as its own stream with the file size.
 var SERVER_ORDER = ['FSL Server', 'FSLv2 Server', 'Pixel Server', 'HubCloud Server'];
 
+// A direct file button: hubcloud's generated page now often hands the
+// file itself out (a worker host), with the name and size in the
+// button, instead of a presigned R2 link.
+var DIRECT_FILE = /^https?:\/\/[^\s"'<>]+\.(?:mkv|mp4|m4v|mov|avi|webm|ts|m3u8)(?:[?#][^\s"'<>]*)?$/i;
+var DIRECT_SIZE = /\[\s*(\d+(?:\.\d+)?\s*(?:KB|MB|GB|TB))\s*\]/i;
+
 function serverNameFromLabel(label) {
 var value = String(label || '');
 if (/10gbps/i.test(value)) return '';
@@ -2350,14 +2356,100 @@ if (size) parts.push(size);
 return parts.join(' · ');
 }
 
+// "Download File [2.09 GB]" buttons: the file url is on the button, so
+// it is a server of its own whatever host it lives on.
+function directFileButtons(html) {
+var anchors = String(html || '').match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+var out = [];
+var seen = {};
+
+for (var i = 0; i < anchors.length; i++) {
+var opening = (anchors[i].match(/^<a\b[^>]*>/i) || [])[0] || '';
+var href = decode(attr(opening, 'href'));
+var buttonText = text(anchors[i]);
+
+if (!href || !/download/i.test(buttonText)) continue;
+if (!DIRECT_FILE.test(href)) continue;
+if (/\.(?:zip|rar|7z|tar|gz)(?:[?#]|$)/i.test(href)) continue;
+
+var key = href.split('?')[0];
+
+if (seen[key]) continue;
+
+seen[key] = true;
+out.push({
+url: href,
+server: serverNameFromLabel(buttonText) || 'HubCloud Server',
+size: (buttonText.match(DIRECT_SIZE) || [])[1] || ''
+});
+}
+
+return out;
+}
+
+// A direct file button can point at a file whose host has given up on
+// it (a Drive mirror over quota answers 403 with a JSON error). One
+// small range request tells a playable file from a dead one.
+async function fileIsPlayable(url) {
+try {
+var response = await withTimeout(
+http_get(url, {
+'User-Agent': 'Mozilla/5.0',
+Range: 'bytes=0-2047'
+}),
+TIMEOUT.page,
+url
+);
+
+if (!response) return true;
+
+var status = Number(response.status) || 0;
+
+if (status === 403 || status === 404 || status === 410 || status === 451) {
+reportError('direct file unavailable: HTTP ' + status);
+
+return false;
+}
+
+// Error pages come back as JSON or HTML instead of file bytes.
+var head = String(response.body || '').slice(0, 400).trim();
+
+if (/^[{[]/.test(head) && /error|exceeded|not found|forbidden/i.test(head)) {
+reportError('direct file unavailable: host error');
+
+return false;
+}
+
+if (/^<(!doctype|html|\?xml)/i.test(head)) {
+reportError('direct file unavailable: HTML page');
+
+return false;
+}
+
+return true;
+} catch (error) {
+return true;
+}
+}
+
 // Parse every "Download [.. Server]" button of a generated page.
-async function serversFromGenerated(html, fallback, quality) {
+async function serversFromGenerated(html, fallback, quality, reload) {
 var base = fileMeta(html, (fallback && fallback.quality) || quality);
 var size = base.size || (fallback && fallback.size) || '';
 var label = base.quality || (fallback && fallback.quality) || quality || 'Auto';
 var anchors = String(html || '').match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
 var picked = [];
 var seen = {};
+
+directFileButtons(html).forEach(function (entry) {
+seen['file:' + entry.url.split('?')[0]] = true;
+picked.push({
+url: entry.url,
+server: entry.server,
+size: entry.size,
+direct: true
+});
+});
 
 // Pixel links are handed out in two steps: the button carries a shared
 // placeholder and a script right after it swaps in the real file (the
@@ -2367,8 +2459,20 @@ var pixels = [];
 var pixelRe = /pixeldrain\.(?:dev|com)\/u\/([A-Za-z0-9]+)/gi;
 var pixelMatch;
 
+// The button's own href is a shared placeholder ("negn6f"), so ids that
+// a script assigns to the button are the real ones and go first.
+var scriptPixels = String(html || '').match(
+/\.href\s*=\s*["']https?:\/\/pixeldrain\.(?:dev|com)\/u\/[A-Za-z0-9]+/gi
+) || [];
+
+scriptPixels.forEach(function (value) {
+var id = (value.match(/\/u\/([A-Za-z0-9]+)/i) || [])[1];
+
+if (id && pixels.indexOf(id) < 0 && pixels.length < 4) pixels.push(id);
+});
+
 while ((pixelMatch = pixelRe.exec(String(html || ''))) !== null) {
-if (pixels.indexOf(pixelMatch[1]) < 0 && pixels.length < 3) {
+if (pixels.indexOf(pixelMatch[1]) < 0 && pixels.length < 4) {
 pixels.push(pixelMatch[1]);
 }
 }
@@ -2381,6 +2485,7 @@ var buttonText = text(anchors[i]);
 if (!href || !/download/i.test(buttonText)) continue;
 
 var server = serverNameFromLabel(buttonText);
+
 if (!server || seen[server]) continue;
 
 if (server === 'Pixel Server') continue;
@@ -2393,11 +2498,58 @@ picked.push({ url: href, server: server });
 }
 }
 
+if (picked.length) {
+var checked = await Promise.all(
+picked.map(function (entry) {
+return entry.direct ? fileIsPlayable(entry.url) : true;
+})
+);
+
+// The proxy hosts behind a direct file rotate and each has its own
+// quota, so a 403 can be cured by asking the page for the button
+// again: one reload, then every new url is tried.
+var reloaded = null;
+var tried = {};
+
+picked.forEach(function (entry) {
+tried[entry.url.split('?')[0]] = true;
+});
+
+for (var q = 0; q < picked.length; q++) {
+if (checked[q] || !picked[q].direct || !reload) continue;
+
+try {
+if (reloaded === null) reloaded = await reload();
+} catch (error) {
+reloaded = '';
+}
+
+var fresh = (directFileButtons(reloaded) || []).filter(function (entry) {
+return !tried[entry.url.split('?')[0]];
+});
+
+for (var r = 0; r < fresh.length; r++) {
+tried[fresh[r].url.split('?')[0]] = true;
+
+if (await fileIsPlayable(fresh[r].url)) {
+picked[q].url = fresh[r].url;
+picked[q].size = picked[q].size || fresh[r].size;
+checked[q] = true;
+break;
+}
+}
+}
+
+picked = picked.filter(function (entry, at) {
+return checked[at];
+});
+}
+
 var streams = picked.map(function (entry) {
 return {
 url: entry.url,
 quality: label,
-source: labelWithSize(entry.server, size, label)
+source: labelWithSize(entry.server, entry.size || size, label)
 };
 });
 
@@ -2427,7 +2579,9 @@ var html = await get(url);
 
 // Already on the generated page: just read its server buttons.
 if (GENERATE_HOST.test(url)) {
-var direct = await serversFromGenerated(html, null, quality);
+var direct = await serversFromGenerated(html, null, quality, function () {
+return fetchUrl(url, { 'User-Agent': 'Mozilla/5.0' }, TIMEOUT.page);
+});
 
 if (!direct.length) {
 throw new Error('No download server on the generated page');
@@ -2447,7 +2601,9 @@ var generated = await get(link, {
 'Referer': url
 });
 
-streams = await serversFromGenerated(generated, base, quality);
+streams = await serversFromGenerated(generated, base, quality, function () {
+return fetchUrl(link, { 'User-Agent': 'Mozilla/5.0', 'Referer': url }, TIMEOUT.page);
+});
 } catch (error) {
 reportError('Generated page failed: ' + String(error));
 }
