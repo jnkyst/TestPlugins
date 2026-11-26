@@ -1667,11 +1667,20 @@ reportError('hblinks lookup failed: ' + String(error.message || error));
 
 var fileIndex = {};
 
-// Most precise first: the Drive links next to each episode on the
-// post, then the pack page files, then HUBLinks.
+// Every source is merged, not just the first one that knows the
+// episode: the Drive links next to the episode on the post, the pack
+// page files and HUBLinks. Taking only one source is what left an
+// episode with nothing but its 480p copy while 720p and 1080p existed
+// elsewhere.
 [blockIndex, packIndex, hubIndex].forEach(function (index) {
 Object.keys(index).forEach(function (key) {
-if (!fileIndex[key]) fileIndex[key] = index[key];
+var files = index[key] || [];
+
+if (!fileIndex[key]) fileIndex[key] = [];
+
+files.forEach(function (file) {
+if (fileIndex[key].indexOf(file) < 0) fileIndex[key].push(file);
+});
 });
 }
 );
