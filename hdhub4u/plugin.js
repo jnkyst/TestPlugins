@@ -1644,9 +1644,10 @@ if (!tag) return;
 
 var key = tag.season + ':' + tag.episode;
 
-if (packIndex[key]) return;
-
-packIndex[key] = [file.url];
+// Every pack is read (480p, 720p, 1080p …), so one episode ends
+// with all of its qualities, not just the first pack's copy.
+if (!packIndex[key]) packIndex[key] = [];
+if (packIndex[key].indexOf(file.url) < 0) packIndex[key].push(file.url);
 });
 }
 }
@@ -1677,12 +1678,33 @@ if (!fileIndex[key]) fileIndex[key] = index[key];
 
 // Episodes found from the player get their files attached, so the
 // stream list shows the HubDrive servers for each of them.
+// Best quality first, so an episode opens on its highest copy.
+function bestFirst(files) {
+return files.slice().sort(function (a, b) {
+return qualityRank(qualityFromName(b)) - qualityRank(qualityFromName(a));
+});
+}
+
+function qualityFromName(url) {
+var name = '';
+
+try {
+name = decodeURIComponent(String(url || ''));
+} catch (error) {
+name = String(url || '');
+}
+
+var match = name.match(/\b(2160p|1440p|1080p|720p|540p|480p|4k)\b/i);
+
+return match ? match[1] : qualityOf(name);
+}
+
 if (list.length) {
 list.forEach(function (episode) {
-var files = fileIndex[episode.season + ':' + episode.episode];
+var files = bestFirst(fileIndex[episode.season + ':' + episode.episode] || []);
 var link = String(episode.url || '').split('#')[0];
 
-if (!files || !files.length) return;
+if (!files.length) return;
 
 // An ad-gated watch link (greenmotors / hubstream / hdstream4u) is
 // never a stream here: the episode opens on its HubDrive file.
@@ -1715,9 +1737,9 @@ if (seen[key]) return;
 
 seen[key] = true;
 
-var files = fileIndex[key];
+var files = bestFirst(fileIndex[key]);
 
-// The first file is the episode URL; the rest come from the cache.
+// The best file is the episode URL; the rest come from the cache.
 EPISODE_FILES[files[0]] = files;
 
 list.push(new Episode({
@@ -1952,7 +1974,7 @@ return String(title || '')
 .replace(/\[[^\]]*\]/g, ' ')
 .replace(/\bseason\s*\d{1,2}\b/gi, ' ')
 .replace(
-/\b(?:all\s+episodes|full\s+series|complete|hindi|english|tamil|telugu|malayalam|kannada|punjabi|dubbed|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio|dual|multi|audio)\b/gi,
+/\b(?:all\s+episodes|full\s+series|complete|hindi|english|tamil|telugu|malayalam|kannada|punjabi|dubbed|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio|dual|multi|audio|audios|added|add|eps?|packs?|zipped?)\b/gi,
 ' '
 )
 // OTT tags tacked onto post titles ("… | PrimeVideo Series [EP – 1 Added]").
@@ -1986,9 +2008,11 @@ var pad = season < 10 ? '0' + season : String(season);
 
 // One word is often all a search needs ("Dhindora S02"), and it is
 // the only form that still matches when the title is full of tags.
-[short3 + ' S' + pad, short2 + ' S' + pad, short1 + ' S' + pad,
-name + ' S' + pad, short3 + ' S' + season, name + ' S' + season,
-short3, short1].forEach(function (query) { list.push(query); });
+// The full cleaned name is the most precise query, so it goes first;
+// the shorter forms follow for posters who abbreviate.
+[name + ' S' + pad, short3 + ' S' + pad, short2 + ' S' + pad,
+short1 + ' S' + pad, name + ' S' + season, short3 + ' S' + season,
+name, short1].forEach(function (query) { list.push(query); });
 } else {
 list.push(name);
 list.push(words.slice(0, 3).join(' '));
@@ -2058,6 +2082,15 @@ log('hblinks: "' + queries[i] + '" -> ' + found.length + ' entr(ies)');
 } else if (found.length) {
 // This query only repeated what is already known: nothing left to add.
 break;
+} else if (posts.some(function (post) {
+// The show is on HUBLinks but only as season packs: no episode
+// posts exist, so no further query can find one.
+var name = hubFilesFromPost(post).title;
+
+return !!name && hubMatchesShow(name, title) && !episodeTag(name);
+})) {
+log('hblinks: "' + queries[i] + '" -> season packs only');
+break;
 }
 
 if (enough && found.length >= Math.max(1, enough - 2)) break;
@@ -2067,17 +2100,26 @@ return found;
 }
 
 // "Show S05E02" -> { season: 5, episode: 2 } (also S05-E02, S5 Ep 2)
+// Every meaningful word of the show has to appear in the HUBLinks post
+// title: "The Good Doctor" must not accept "The Good Place".
 function hubMatchesShow(title, showName) {
 var words = searchName(showName)
 .toLowerCase()
 .split(' ')
-.filter(function (word) { return word.length > 3; });
+.filter(function (word) {
+return word.length > 2 && !/^(?:the|and|of|for|with|from)$/.test(word);
+});
 
 if (!words.length) return true;
 
-var value = String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+var value = ' ' +
+String(title || '')
+.toLowerCase()
+.replace(/[^a-z0-9]+/g, ' ')
+.replace(/\s+/g, ' ') +
+' ';
 
-return words.some(function (word) { return value.indexOf(word) >= 0; });
+return words.every(function (word) { return value.indexOf(' ' + word) >= 0; });
 }
 
 // Episodes of one season -> their HubDrive files.
@@ -2928,11 +2970,19 @@ var quality = '';
 if (STREAM_SOURCE === 'playdrive') {
 extraUrls = [];
 } else if (!extraUrls.length && EPISODE_FILES[url]) {
-extraUrls = [].concat(EPISODE_FILES[url]);
+// The episode's own file and its sibling qualities: every one of
+// them is resolved, so the copy the episode points at is never lost.
+extraUrls = [url].concat(EPISODE_FILES[url]);
 }
 
+var seenExtra = {};
+
 extraUrls = extraUrls.filter(function (extra) {
-return extra && extra !== url && !BLOCKED_HOST.test(extra);
+if (!extra || BLOCKED_HOST.test(extra)) return false;
+if (seenExtra[extra]) return false;
+
+seenExtra[extra] = true;
+return true;
 });
 
 var extraPending = extraUrls.length
@@ -3048,7 +3098,9 @@ var perEpisode = ordered.filter(function (button) {
 return !isSeasonArchive(button.label);
 });
 
-ordered = (perEpisode.length ? perEpisode : ordered).slice(0, 1);
+// One "EP – PACK" per quality: all of them are read so the episode
+// comes back with every quality it has.
+ordered = (perEpisode.length ? perEpisode : ordered).slice(0, 3);
 }
 }
 
@@ -3086,6 +3138,8 @@ postKeys,
 html
 );
 
+// 2. HUBLinks: one post per episode, each with that episode's
+//    HubDrive files.
 if (!seriesFirst.length) {
 var hubFirst = await hubEpisodeFiles(pageTitle, seriesSeason, 1);
 var hubKeys = Object.keys(hubFirst).sort(byEpisodeKey);
@@ -3097,6 +3151,54 @@ hubKeys,
 html
 );
 }
+
+// 3. Last resort: the post's own pack pages (one per quality), whose
+//    rows name the episode they belong to.
+if (!seriesFirst.length) {
+// HubDrive file / pack buttons only — never a player — and the rows
+// they give must name an episode: a whole-season file is not one.
+var packButtons = uniqueBy(
+ordered.filter(function (button) {
+return (
+PACK_HOST.test(button.url) ||
+(FILE_HOST.test(button.url) && !isSeasonArchive(button.label))
+);
+}),
+function (button) { return button.url; }
+).slice(0, 3);
+
+if (packButtons.length) {
+var packLists = await Promise.all(
+packButtons.map(function (button) {
+return resolveStreams(
+button.url,
+button.quality || qualityOf(html),
+0
+).then(null, function (error) {
+reportError('pack page failed: ' + String(error.message || error));
+
+return [];
+});
+})
+);
+
+var packStreams = packLists.reduce(function (all, list) {
+return all.concat(list);
+}, []);
+
+var tagged = packStreams.filter(function (stream) {
+return !!streamEpisodeTag(stream);
+});
+
+if (tagged.length) {
+seriesFirst = tagged;
+
+log('post: pack pages -> ' + packButtons.length + ' page(s), ' +
+tagged.length + ' episode row(s)');
+}
+}
+}
+
 } catch (error) {
 reportError('series first-episode lookup failed: ' + String(error.message || error));
 }
