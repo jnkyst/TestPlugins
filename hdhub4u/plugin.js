@@ -1782,11 +1782,19 @@ return String(title || '')
 .replace(/\[[^\]]*\]/g, ' ')
 .replace(/\bseason\s*\d{1,2}\b/gi, ' ')
 .replace(
-/\b(?:all\s+episodes|full\s+series|complete|hindi|english|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio)\b/gi,
+/\b(?:all\s+episodes|full\s+series|complete|hindi|english|tamil|telugu|malayalam|kannada|punjabi|dubbed|webrip|web-dl|webdl|hdrip|bluray|ds4k|dual\s+audio|dual|multi|audio)\b/gi,
+' '
+)
+// OTT tags tacked onto post titles ("… | PrimeVideo Series [EP – 1 Added]").
+.replace(
+/\b(?:prime\s*video|primevideo|amazon|netflix|jiostar|jio\s*hotstar|hotstar|sonyliv|sony\s*liv|zee\s*5|mx\s*player|altbalaji|appletv|apple\s*tv|disney\s*\+?|series|movies?|episodes?|show)\b/gi,
 ' '
 )
 .replace(/\b\d{3,4}p\b/gi, ' ')
-.replace(/\b(?:4k|2k|uhd|hd|hevc|x264|x265|10bit|aac|ddp\s*\d?(?:\.\d)?|atmos|esubs?)\b/gi, ' ')
+.replace(
+/\b(?:4k|2k|uhd|hd|hevc|x264|x265|10bit|aac|ddp?|dts|ac3|eac3|atmos|esubs?|\d+\.\d+)\b/gi,
+' '
+)
 .replace(/[^A-Za-z0-9 ]+/g, ' ')
 .replace(/\s+/g, ' ')
 .trim();
@@ -1798,14 +1806,17 @@ var words = name.split(' ').filter(Boolean);
 var list = [];
 
 if (season) {
-// HUBLinks posters write "S05-E02" more often than "S5", so the
-// padded form goes first; "S5" is also searched because it matches
-// a wider set of posts.
-list.push(name + ' S' + (season < 10 ? '0' + season : season));
-list.push(name + ' S' + season);
-list.push(words.slice(0, 3).join(' ') + ' S' + season);
-list.push(words.slice(0, 2).join(' ') + ' S' + season);
-list.push(name);
+// HUBLinks writes "S01E01", not "S1E1": the padded form is searched
+// first, on the short show name and then on the full one, because a
+// long title ("… WEB-DL Hindi Dual Audio PrimeVideo") never matches.
+var short3 = words.slice(0, 3).join(' ');
+var short2 = words.slice(0, 2).join(' ');
+var pad = season < 10 ? '0' + season : String(season);
+
+[short3 + ' S' + pad, name + ' S' + pad, short2 + ' S' + pad,
+short3 + ' S' + season, name + ' S' + season, short3].forEach(
+function (query) { list.push(query); }
+);
 } else {
 list.push(name);
 list.push(words.slice(0, 3).join(' '));
