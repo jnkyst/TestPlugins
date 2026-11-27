@@ -40,7 +40,7 @@
 // live page declares its own host in rel=canonical / og:url, so
 // noteOrigin() re-anchors the origin for the rest of the session on
 // the first page fetched. manifest.baseUrl may point at the stable
-// primary/landing domain (e.g. https://movielinkbd.info/) - landing
+// primary/landing domain (e.g. https://movielinkbd.com/) - landing
 // pages link out to the content subdomain, which noteOrigin()
 // resolves. Editing plugin.json while the plugin runs is also picked
 // up: a changed manifest.baseUrl discards the cached origin.
@@ -74,28 +74,56 @@ host = fromUrl[2];
 
 var body = String(html || '');
 
-// 2) rel=canonical / og:url of the fetched page.
+// 2) rel=canonical / og:url of the fetched page (href may carry a
+//    trailing slash or path, e.g. https://movielinkbd.com/).
 if (!host && body) {
 var declared =
-body.match(/<link[^>]*rel=["']canonical["'][^>]*href=["'](https?):\/\/([^"\/]+)["']/i) ||
-body.match(/<meta[^>]*property=["']og:url["'][^>]*content=["'](https?):\/\/([^"\/]+)["']/i);
+body.match(/<link[^>]*rel=["']canonical["'][^>]*href=["']([^"']+)["']/i) ||
+body.match(/<meta[^>]*property=["']og:url["'][^>]*content=["']([^"']+)["']/i);
 
-if (declared && /(^|\.)movielinkbd\.[a-z.]+$/i.test(declared[2])) {
-scheme = declared[1].toLowerCase();
-host = declared[2];
+if (declared) {
+var declaredParts = String(declared[1]).match(/^(https?):\/\/([^\/]+)/i);
+
+if (declaredParts && /(^|\.)movielinkbd\.[a-z.]+$/i.test(declaredParts[2])) {
+scheme = declaredParts[1].toLowerCase();
+host = declaredParts[2];
+}
+}
+}
+
+// 3) Landing/primary apex pages (movielinkbd.com, movielinkbd.info)
+//    declare themselves canonical but link out to the real content
+//    host - a subdomain (xyz.movielinkbd.at) OR another apex
+//    (movielinkbd.tv). Upgrade only when the page carries no listing
+//    markup (a true landing), and pick the most-linked non-self
+//    movielinkbd host so mirror/CDN noise can't win.
+var isApexHost = !!host && /^movielinkbd\.[a-z.]+$/i.test(host);
+
+if (body && (!host || (isApexHost && !listingScope(body)))) {
+var counts = {};
+var hostRe =
+/https:\/\/([a-z0-9-]+\.movielinkbd\.[a-z.]+|movielinkbd\.[a-z.]+)/gi;
+var hit;
+
+while ((hit = hostRe.exec(body)) !== null) {
+var candidate = hit[1].toLowerCase();
+if (candidate === String(host || '').toLowerCase()) continue;
+counts[candidate] = (counts[candidate] || 0) + 1;
+}
+
+var best = '';
+var bestCount = 0;
+
+for (var hostKey in counts) {
+if (counts[hostKey] > bestCount) {
+best = hostKey;
+bestCount = counts[hostKey];
 }
 }
 
-// 3) Primary/landing domains (apex hosts like movielinkbd.info)
-//    declare themselves as canonical but link out to the real
-//    content subdomain (the generated subdomain rotates often).
-//    Prefer the subdomain the page points at, so baseUrl set to
-//    the stable primary domain still resolves the working site.
-if (body && (!host || /^movielinkbd\.[a-z.]+$/i.test(host))) {
-var found = body.match(/https:\/\/([a-z0-9-]+\.movielinkbd\.[a-z.]+)/i);
-if (found) {
+if (best) {
 scheme = 'https';
-host = found[1];
+host = best;
 }
 }
 
@@ -121,7 +149,7 @@ lastManifestBase = manifest.baseUrl;
 
 // Resolve the content baseUrl automatically on first use: when
 // manifest.baseUrl is the stable PRIMARY/landing domain (e.g.
-// https://movielinkbd.info/), fetch its homepage once and let
+// https://movielinkbd.com/), fetch its homepage once and let
 // noteOrigin() pull the live content subdomain out of its links, so
 // every subsequent request goes direct to the content host.
 // Subdomain baseUrl values skip the bootstrap (the first real fetch
@@ -419,6 +447,7 @@ var primaryOrigin = '';
 async function rediscover(failingOrigin) {
 var candidates = [];
 if (primaryOrigin) candidates.push(primaryOrigin);
+candidates.push('https://movielinkbd.com/');
 candidates.push('https://movielinkbd.info/');
 candidates.push('https://movielinkbd.at/');
 
@@ -434,7 +463,8 @@ if (!host || host === failing || seen[host]) continue;
 seen[host] = true;
 
 try {
-await get(origin + '/');
+// Depth-bounded: a failing candidate must not rediscover again.
+await get(origin + '/', 1);
 } catch (error) {
 continue;
 }
@@ -510,11 +540,9 @@ throw lastError;
 var failHost = ((String(url).match(/^https?:\/\/([^\/]+)/i) || [])[1] || '')
 .toLowerCase()
 .replace(/^www\./, '');
-var isContentHost =
-/(^|\.)movielinkbd\.[a-z.]+$/.test(failHost) &&
-!/^movielinkbd\.[a-z.]+$/.test(failHost);
+var isSiteHost = /(^|\.)movielinkbd\.[a-z.]+$/.test(failHost);
 
-if (!_depth && isContentHost) {
+if (!_depth && isSiteHost) {
 try {
 if (await rediscover(failHost)) {
 var recovered = normalizeSiteUrl(url);
@@ -701,7 +729,7 @@ encodeURIComponent(term) +
 var fetchBase = base();
 var html = await get(fetchBase + queryPath);
 
-// Landing/primary baseUrl (e.g. movielinkbd.info): noteOrigin() may
+// Landing/primary baseUrl (e.g. movielinkbd.com): noteOrigin() may
 // have just resolved the real content host from the fetched page, so
 // re-run the search there instead of parsing the landing page.
 if (base() !== fetchBase && !listingScope(html)) {
@@ -756,8 +784,8 @@ var items;
 try {
 items = listings(html);
 } catch (parseError) {
-// A primary/landing baseUrl serves the landing page for every
-// path; noteOrigin() resolves the real content host from it, so
+// A primary/landing baseUrl (e.g. movielinkbd.com) serves the landing page
+// for every path; noteOrigin() resolves the real content host, so
 // re-fetch the section there once before giving up.
 if (base() !== fetchBase) {
 items = listings(await get(base() + section.path));
