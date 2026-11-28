@@ -1,16 +1,10 @@
 {
   "packageName": "com.jnkyst.repo.4khdhub4u",
   "name": "4KHdhub4u",
-  "version": 2,
+  "version": 3,
   "baseUrl": "https://4khdhub.one/",
   "description": "4KHdhub4u Bollywood, Hollywood and Hindi Dubbed Movies & Web Series",
-  "authors": [
-    "Jnkyst"
-  ],
-  "languages": [
-    "hi"
-  ],
-  "categories": [
-    "Movie",  "TvSeries"
-  ]
+  "authors": ["Jnkyst"],
+  "languages": ["hi"],
+  "categories": ["Movie", "TvSeries"]
 }

@@ -247,20 +247,45 @@
       throw new Error('Unsupported file host');
     }
     var hubHtml = await get(hub);
+    var title = text((hubHtml.match(/<title\b[^>]*>[\s\S]*?<\/title\s*>/i) || [])[0] || '');
+    if (/\.(?:zip|rar|7z)\s*$/i.test(title)) throw new Error('Archive files are not playable video');
+    var resolution = (title.match(/\b(2160p|1440p|1080p|720p|480p)\b/i) || [])[1] || '';
+    var hubText = text(hubHtml.replace(/<script\b[\s\S]*?<\/script\s*>/gi, ' '));
+    var size = (hubText.match(/File\s*Size\s*([\d.,]+\s*(?:TB|GB|MB|KB))\b/i) || [])[1] || '';
     var generator = hubHtml.match(/https:\/\/gamerxyt\.com\/hubcloud\.php\?[^\s"'<>]+/i);
     if (!generator) throw new Error('HubCloud download link not found');
     var page = await get(decode(generator[0]));
     var anchors = page.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
-    var results = [];
+    var results = [], pixels = [];
     anchors.forEach(function (anchor) {
       var tag = (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
-      var href = attr(tag, 'href');
-      if (/^https:\/\/[a-z0-9-]+\.r2\.cloudflarestorage\.com\//i.test(href)) {
-        results.push({ url: href, source: text(anchor) || 'HubCloud' });
+      var href = attr(tag, 'href'), label = text(anchor);
+      var pixel = href.match(/^https:\/\/pixeldrain\.dev\/u\/([A-Za-z0-9]+)\/?(?:\?.*)?$/i);
+      if (pixel && /pixel/i.test(label)) { pixels.push(pixel[1]); return; }
+      if (!/^https:\/\/[a-z0-9-]+\.r2\.cloudflarestorage\.com\//i.test(href)) return;
+      if (/FSL\s*(?:SERVER\s*)?V\s*2|FSLV2/i.test(label)) {
+        results.push({ url: href, source: 'FSLV2 Server', rank: 2, quality: resolution, size: size });
+      } else if (/FSL\s*(?:SERVER)?/i.test(label)) {
+        results.push({ url: href, source: 'FSL Server', rank: 1, quality: resolution, size: size });
       }
     });
-    if (!results.length) throw new Error('No direct HubCloud video URL found');
+    // Metadata is checked before advertising PixelServer as playable.
+    for (var i = 0; i < Math.min(pixels.length, 4); i++) {
+      try {
+        var info = JSON.parse(await get('https://pixeldrain.dev/api/file/' + pixels[i] + '/info'));
+        if (!info || info.success !== true || info.can_download === false || !/^video\//i.test(String(info.mime_type || ''))) continue;
+        var pixelSize = Number(info.size) > 0 ? formatSize(Number(info.size)) : size;
+        results.push({ url: 'https://pixeldrain.dev/api/file/' + pixels[i], source: 'Pixel Server', rank: 3, quality: resolution, size: pixelSize });
+      } catch (error) { console.error('Pixel Server metadata unavailable: ' + String(error)); }
+    }
+    if (!results.length) throw new Error('No supported FSL or Pixel Server video URL found');
     return results;
+  }
+
+  function formatSize(bytes) {
+    var units = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+    while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+    return (i ? bytes.toFixed(2).replace(/\.00$/, '') : String(bytes)) + ' ' + units[i];
   }
 
   async function loadStreams(url, callback) {
@@ -283,7 +308,7 @@
       }
       if (!candidates.length) throw new Error('No supported HubCloud or HubDrive links found for this item');
       var streams = [], seen = {};
-      var batches = candidates.slice(0, 12);
+      var batches = candidates.slice(0, 24);
       for (var i = 0; i < batches.length; i += 3) {
         var resolved = await Promise.all(batches.slice(i, i + 3).map(async function (candidate) {
           try { return { urls: await resolveHubLink(candidate.url), quality: candidate.quality }; }
@@ -294,14 +319,18 @@
           result.urls.forEach(function (item) {
             if (!seen[item.url]) {
               seen[item.url] = true;
-              streams.push(new StreamResult({ url: item.url, source: item.source,
-                quality: result.quality }));
+              var quality = item.quality || result.quality || 'Auto';
+              var label = item.source + ' (' + quality + (item.size ? ' · ' + item.size : '') + ')';
+              streams.push({ rank: item.rank, value: new StreamResult({
+                url: item.url, source: label, quality: quality
+              }) });
             }
           });
         });
       }
       if (!streams.length) throw new Error('Could not resolve a direct stream; host format may have changed');
-      callback({ success: true, data: streams });
+      streams.sort(function (a, b) { return a.rank - b.rank; });
+      callback({ success: true, data: streams.map(function (item) { return item.value; }) });
     } catch (error) { fail(callback, error); }
   }
 
