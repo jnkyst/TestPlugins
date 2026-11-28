@@ -1,6 +1,6 @@
 /* 4KHDHub SkyStream provider: home, search and basic details.
  * Use only content you are authorized to access.
- * Playback and series-episode extraction are not implemented.
+ * Supports individual episodes and HubCloud/HubDrive-to-HubCloud links.
  */
 (function () {
   'use strict';
@@ -167,7 +167,7 @@
       var tags = block.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
       tags.forEach(function (tag) {
         var href = attr((tag.match(/^<a\b[^>]*>/i) || [])[0], 'href');
-        if (/^https:\/\/greenmotors\.(?:club|cc)\//i.test(href) && /hubcloud/i.test(text(tag))) {
+        if (/^https:\/\/greenmotors\.(?:club|cc)\//i.test(href) && /hubcloud|hubdrive/i.test(text(tag))) {
           var quality = (text(file).match(/\b(2160p|1080p|720p|480p)\b/i) || [])[1] || 'Auto';
           if (!out.some(function (entry) { return entry.url === href; })) out.push({ url: href, quality: quality });
         }
@@ -228,6 +228,21 @@
     if (!encoded) throw new Error('Intermediate link format changed');
     var data = JSON.parse(decode64(rot13(decode64(decode64(encoded[1])))));
     var hub = decode64(data.o || '');
+    var isHubDrive = /^https:\/\/(?:www\.)?hubdrive\.(?:blog|com|in|xyz)\/file\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(hub);
+    if (isHubDrive) {
+      var driveHtml = await get(hub);
+      var driveAnchors = driveHtml.match(/<a\b[^>]*>/gi) || [];
+      var forwarded = '';
+      driveAnchors.some(function (tag) {
+        var link = attr(tag, 'href');
+        if (/^https:\/\/(?:www\.)?hubcloud\.(?:mov|pw|cx)\/drive\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(link)) {
+          forwarded = link; return true;
+        }
+        return false;
+      });
+      if (!forwarded) throw new Error('HubDrive has no supported direct or HubCloud video link');
+      hub = forwarded;
+    }
     if (!/^https:\/\/(?:www\.)?hubcloud\.(?:mov|pw|cx)\/drive\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(hub)) {
       throw new Error('Unsupported file host');
     }
@@ -257,16 +272,16 @@
       if (match) {
         candidates = individualLinks(html, Number(match[2]), Number(match[3]));
       } else {
-        // For movies, collect HubCloud download buttons from the post.
+        // For movies, collect HubCloud and HubDrive buttons from the post.
         candidates = [];
         (html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || []).forEach(function (anchor) {
           var href = attr((anchor.match(/^<a\b[^>]*>/i) || [])[0], 'href');
-          if (/^https:\/\/greenmotors\.(?:club|cc)\//i.test(href) && /hubcloud/i.test(text(anchor))) {
+          if (/^https:\/\/greenmotors\.(?:club|cc)\//i.test(href) && /hubcloud|hubdrive/i.test(text(anchor))) {
             candidates.push({ url: href, quality: 'Auto' });
           }
         });
       }
-      if (!candidates.length) throw new Error('No supported HubCloud links found for this item');
+      if (!candidates.length) throw new Error('No supported HubCloud or HubDrive links found for this item');
       var streams = [], seen = {};
       var batches = candidates.slice(0, 12);
       for (var i = 0; i < batches.length; i += 3) {
