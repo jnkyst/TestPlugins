@@ -140,6 +140,42 @@
     } catch (error) { fail(callback, error); }
   }
 
+  // Read individual episode filenames without inventing episodes from packs.
+  function episodeEntries(html) {
+    var entries = {}, re = /<div\b[^>]*class=["'][^"']*\bepisode-file-title\b[^"']*["'][^>]*>([\s\S]*?)<\/div\s*>/gi, m;
+    while ((m = re.exec(html))) {
+      var filename = text(m[1]);
+      var number = filename.match(/(?:^|[^a-z0-9])s(\d{1,2})e(\d{1,3})(?!\d)/i);
+      if (!number) continue;
+      var season = Number(number[1]), episode = Number(number[2]);
+      var key = season + ':' + episode;
+      if (!entries[key]) entries[key] = { season: season, episode: episode };
+    }
+    return Object.keys(entries).map(function (key) { return entries[key]; })
+      .sort(function (a, b) { return a.season - b.season || a.episode - b.episode; });
+  }
+
+  function individualLinks(html, season, episode) {
+    var re = /<div\b[^>]*class=["'][^"']*\bepisode-download-item\b[^"']*["'][^>]*>/gi;
+    var starts = [], m, out = [];
+    while ((m = re.exec(html))) starts.push(m.index);
+    starts.forEach(function (start, i) {
+      var block = html.slice(start, i + 1 < starts.length ? starts[i + 1] : html.length);
+      var file = (block.match(/<div\b[^>]*class=["'][^"']*\bepisode-file-title\b[^"']*["'][^>]*>([\s\S]*?)<\/div\s*>/i) || [])[1] || '';
+      var n = text(file).match(/(?:^|[^a-z0-9])s(\d{1,2})e(\d{1,3})(?!\d)/i);
+      if (!n || Number(n[1]) !== season || Number(n[2]) !== episode) return;
+      var tags = block.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+      tags.forEach(function (tag) {
+        var href = attr((tag.match(/^<a\b[^>]*>/i) || [])[0], 'href');
+        if (/^https:\/\/greenmotors\.(?:club|cc)\//i.test(href) && /hubcloud/i.test(text(tag))) {
+          var quality = (text(file).match(/\b(2160p|1080p|720p|480p)\b/i) || [])[1] || 'Auto';
+          if (!out.some(function (entry) { return entry.url === href; })) out.push({ url: href, quality: quality });
+        }
+      });
+    });
+    return out;
+  }
+
   async function load(url, callback) {
     try {
       if (!isPostPage(url)) throw new Error('Not a supported 4KHDHub post URL');
@@ -151,7 +187,11 @@
       var type = kind(title, url);
       var episodes = type === 'movie'
         ? [new Episode({ name: 'Full Movie', url: url, season: 1, episode: 1 })]
-        : [];
+        : episodeEntries(html).map(function (ep) {
+          return new Episode({ name: 'Episode ' + ep.episode,
+            url: url + '#skyepisode=' + ep.season + '-' + ep.episode,
+            season: ep.season, episode: ep.episode });
+        });
       callback({ success: true, data: new MultimediaItem({
         title: title, url: url, posterUrl: poster, bannerUrl: poster,
         type: type, year: yearOf(title),
@@ -161,10 +201,93 @@
     } catch (error) { fail(callback, error); }
   }
 
+  function decode64(value) {
+    var input = String(value || '').replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+    if (typeof atob === 'function') return atob(input);
+    var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    var out = '', bits = 0, count = 0;
+    for (var i = 0; i < input.length; i++) {
+      var v = alphabet.indexOf(input.charAt(i));
+      if (v < 0) continue;
+      bits = (bits << 6) | v; count += 6;
+      if (count >= 8) { count -= 8; out += String.fromCharCode((bits >> count) & 255); }
+    }
+    return out;
+  }
+
+  function rot13(s) {
+    return String(s).replace(/[a-z]/gi, function (c) {
+      var baseCode = c <= 'Z' ? 65 : 97;
+      return String.fromCharCode((c.charCodeAt(0) - baseCode + 13) % 26 + baseCode);
+    });
+  }
+
+  async function resolveHubLink(url) {
+    var html = await get(url);
+    var encoded = html.match(/\bs\s*\(\s*["']o["']\s*,\s*["']([A-Za-z0-9+/=_-]+)["']/i);
+    if (!encoded) throw new Error('Intermediate link format changed');
+    var data = JSON.parse(decode64(rot13(decode64(decode64(encoded[1])))));
+    var hub = decode64(data.o || '');
+    if (!/^https:\/\/(?:www\.)?hubcloud\.(?:mov|pw|cx)\/drive\/[A-Za-z0-9_-]+\/?(?:\?.*)?$/i.test(hub)) {
+      throw new Error('Unsupported file host');
+    }
+    var hubHtml = await get(hub);
+    var generator = hubHtml.match(/https:\/\/gamerxyt\.com\/hubcloud\.php\?[^\s"'<>]+/i);
+    if (!generator) throw new Error('HubCloud download link not found');
+    var page = await get(decode(generator[0]));
+    var anchors = page.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || [];
+    var results = [];
+    anchors.forEach(function (anchor) {
+      var tag = (anchor.match(/^<a\b[^>]*>/i) || [])[0] || '';
+      var href = attr(tag, 'href');
+      if (/^https:\/\/[a-z0-9-]+\.r2\.cloudflarestorage\.com\//i.test(href)) {
+        results.push({ url: href, source: text(anchor) || 'HubCloud' });
+      }
+    });
+    if (!results.length) throw new Error('No direct HubCloud video URL found');
+    return results;
+  }
+
   async function loadStreams(url, callback) {
-    // The current site links through an intermediate host that this
-    // implementation does not resolve. Do not return it as a video URL.
-    fail(callback, new Error('Playback is not implemented for this site.'));
+    try {
+      var match = String(url || '').match(/^(https?:\/\/[^#]+)#skyepisode=(\d+)-(\d+)$/);
+      var post = match ? match[1] : url;
+      if (!isPostPage(post)) throw new Error('Unsupported page URL');
+      var html = await get(post), candidates;
+      if (match) {
+        candidates = individualLinks(html, Number(match[2]), Number(match[3]));
+      } else {
+        // For movies, collect HubCloud download buttons from the post.
+        candidates = [];
+        (html.match(/<a\b[^>]*>[\s\S]*?<\/a\s*>/gi) || []).forEach(function (anchor) {
+          var href = attr((anchor.match(/^<a\b[^>]*>/i) || [])[0], 'href');
+          if (/^https:\/\/greenmotors\.(?:club|cc)\//i.test(href) && /hubcloud/i.test(text(anchor))) {
+            candidates.push({ url: href, quality: 'Auto' });
+          }
+        });
+      }
+      if (!candidates.length) throw new Error('No supported HubCloud links found for this item');
+      var streams = [], seen = {};
+      var batches = candidates.slice(0, 12);
+      for (var i = 0; i < batches.length; i += 3) {
+        var resolved = await Promise.all(batches.slice(i, i + 3).map(async function (candidate) {
+          try { return { urls: await resolveHubLink(candidate.url), quality: candidate.quality }; }
+          catch (error) { console.error('HubCloud: ' + String(error)); return null; }
+        }));
+        resolved.forEach(function (result) {
+          if (!result) return;
+          result.urls.forEach(function (item) {
+            if (!seen[item.url]) {
+              seen[item.url] = true;
+              streams.push(new StreamResult({ url: item.url, source: item.source,
+                quality: result.quality }));
+            }
+          });
+        });
+      }
+      if (!streams.length) throw new Error('Could not resolve a direct stream; host format may have changed');
+      callback({ success: true, data: streams });
+    } catch (error) { fail(callback, error); }
   }
 
   globalThis.getHome = getHome;
